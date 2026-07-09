@@ -70,3 +70,8 @@ graphify-out/
 node_modules/
 package-lock.json
 docs/ui-ux/review-shots/
+webui_launch.log
+webui_error.log
+server.crt
+server.key
+tmp-output.txt
