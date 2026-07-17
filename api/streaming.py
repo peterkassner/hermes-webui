@@ -483,20 +483,15 @@ def _runtime_preferred_base_url(
     resolved_provider: str | None,
     configured_base_url: str | None,
 ) -> str | None:
-    """Prefer the runtime-normalized base_url, but never override an explicit
-    configured endpoint that points somewhere genuinely different.
+    """Choose the final endpoint without turning config into a Codex override.
 
-    The #3895 bug was that WebUI used the *configured* base_url (which can carry a
-    duplicated ``/v1``) instead of the runtime provider's per-model-normalized
-    base_url, 404ing OpenCode-Go. But blindly preferring the runtime URL would
-    clobber a legitimate ``providers.<id>.base_url`` override (e.g. LM Studio at a
-    LAN IP, an OpenRouter mirror). So:
-      - no runtime URL            -> keep configured
-      - no configured URL         -> use runtime (all we have)
-      - named ``custom:`` endpoint -> configured wins (then runtime as fallback)
-      - same scheme+host+port     -> runtime wins (it's the normalized/corrected
-                                      form of the same endpoint — the #3895 case)
-      - different endpoint        -> configured override wins (no regression)
+    WebUI obtains ``configured_base_url`` from ``model.base_url`` while native
+    Hermes passes only a caller-supplied ``--base-url`` as ``explicit_base_url``
+    to ``resolve_runtime_provider``.  For ``openai-codex``, treating the config
+    value as explicit makes a Codex Responses request use a non-Codex endpoint.
+    Let the native runtime resolver own Codex's final target, exactly as the CLI
+    does.  Custom endpoints and other provider mirrors retain the established
+    configured-endpoint behavior.
     """
     runtime_base_url = None
     if isinstance(runtime_provider, dict):
@@ -511,6 +506,13 @@ def _runtime_preferred_base_url(
         or (runtime_provider or {}).get("provider")
         or ""
     ).strip().lower()
+
+    # ``openai-codex`` is a native OAuth/Responses provider.  Its runtime
+    # resolver returns the authenticated Codex endpoint; model.base_url is not
+    # an explicit endpoint override in the native CLI, so it cannot be one here.
+    if provider_id == "openai-codex":
+        return runtime_base_url
+
     if provider_id.startswith("custom:"):
         return configured_base_url or runtime_base_url
 

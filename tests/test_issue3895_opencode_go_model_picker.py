@@ -19,6 +19,19 @@ def test_runtime_preferred_base_url_uses_runtime_value_for_pooled_provider():
     ) == "https://opencode.example.com/api"
 
 
+def test_runtime_preferred_base_url_does_not_promote_codex_config_url_to_explicit():
+    """WebUI must match CLI: a YAML URL is not ``--base-url`` for Codex."""
+    assert streaming._runtime_preferred_base_url(
+        {
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        },
+        "openai-codex",
+        "https://inference-api.nousresearch.com/v1",
+    ) == "https://chatgpt.com/backend-api/codex"
+
+
 def test_runtime_preferred_base_url_keeps_custom_config_base_url():
     assert streaming._runtime_preferred_base_url(
         {"provider": "custom:opencode-proxy", "base_url": "https://runtime.example.com"},
