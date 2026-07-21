@@ -92,6 +92,8 @@ export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HOME/.hermes/webui}"
 export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
 export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
 export HERMES_WEBUI_TLS_INSECURE_PROBE="${HERMES_WEBUI_TLS_INSECURE_PROBE:-1}"
+# The GUI restart control is opt-in and uses launchd, the sole process owner.
+export HERMES_WEBUI_RESTART_COMMAND="${HERMES_WEBUI_RESTART_COMMAND:-/bin/launchctl kickstart -k gui/$(id -u)/com.peterkjackson.hermes-webui}"
 
 log "Starting Tailscale Funnel -> https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}"
 if ! tailscale funnel --bg --yes "https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}" >> "$LOG_FILE" 2>> "$ERR_FILE"; then
