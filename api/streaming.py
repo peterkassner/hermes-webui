@@ -7,6 +7,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -70,6 +71,7 @@ from api.process_event_utils import (
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
+    stamp_message_source,
 )
 
 
@@ -1833,6 +1835,77 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
     return env
 
 
+_streaming_hermes_home_override_available = None
+
+
+def _resolve_streaming_hermes_home_override():
+    """Return hermes_constants module if context-local home override APIs exist.
+
+    Cached import-safe resolver mirrors the optional pattern used by
+    `api.profiles` so older agent versions safely degrade to the process-global
+    env mirror fallback.
+    """
+    global _streaming_hermes_home_override_available
+    import sys as _sys
+
+    if _streaming_hermes_home_override_available is False:
+        return None
+
+    mod = _sys.modules.get('hermes_constants')
+    if mod is None and _streaming_hermes_home_override_available is None:
+        try:
+            import hermes_constants  # noqa: F401
+            mod = _sys.modules.get('hermes_constants')
+        except Exception:
+            _streaming_hermes_home_override_available = False
+            return None
+
+    if (
+        mod is not None
+        and hasattr(mod, 'set_hermes_home_override')
+        and hasattr(mod, 'reset_hermes_home_override')
+    ):
+        _streaming_hermes_home_override_available = True
+        return mod
+
+    _streaming_hermes_home_override_available = False
+    return None
+
+
+def _set_streaming_hermes_home_override(profile_home: str):
+    """Install the context-local home override if available.
+
+    Returns ``(module, token, installed)`` so callers can restore it with the
+    matching module in the inverse order.
+    """
+    if not profile_home:
+        return None, None, False
+
+    _home_override_mod = _resolve_streaming_hermes_home_override()
+    if _home_override_mod is None:
+        return None, None, False
+
+    try:
+        _token = _home_override_mod.set_hermes_home_override(profile_home)
+        return _home_override_mod, _token, True
+    except Exception:
+        logger.debug(
+            "Failed to set streaming Hermes home override; continuing with os.environ mirror",
+            exc_info=True,
+        )
+        return None, None, False
+
+
+def _reset_streaming_hermes_home_override(override_mod, override_token, override_installed: bool) -> None:
+    """Reset the context-local home override if it was installed."""
+    if override_mod is None or not override_installed:
+        return
+    try:
+        override_mod.reset_hermes_home_override(override_token)
+    except Exception:
+        logger.debug("Failed to reset streaming Hermes home override", exc_info=True)
+
+
 # ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
 # WebUI bound per-turn session identity ONLY to the process-global
 # os.environ['HERMES_SESSION_KEY'] (turn-start, line ~3263) and released the
@@ -2768,13 +2841,19 @@ def _sanitize_generated_title(text: str) -> str:
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
-    # Guard against chain-of-thought leakage and meta-reasoning patterns.
-    if _looks_invalid_generated_title(s):
+    # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
+    if _is_bad_new_title(s):
         return ''
     return s[:80]
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
+    """True when an existing/persisted title is structurally invalid (CoT leak).
+
+    Intentionally does NOT reject short conversational words like "Done" or
+    "Cool" — those can be legitimate stored titles. Use ``_is_bad_new_title``
+    when validating a freshly generated candidate.
+    """
     s = str(text or '')
     if not s.strip():
         return True
@@ -2786,7 +2865,31 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$', s, flags=re.IGNORECASE)
+    )
+
+
+def _is_bad_new_title(text: str) -> bool:
+    """True when a freshly generated title candidate should be discarded.
+
+    Includes structural CoT rejection plus trivial single-token echo replies
+    (pong, yes, done, cool, …) that are useless as first-generation titles.
+    """
+    if _looks_invalid_generated_title(text):
+        return True
+    s = str(text or '').strip()
+    _token = re.sub(r'[\s.!?]+$', '', s, flags=re.IGNORECASE)
+    if re.fullmatch(
+        r'(?:pong|ping|yes|no|yep|nope|hi|hello|hey|thanks|thank you|sure|k|kk|cool|nice|lol|ok|okay|done)',
+        _token,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.search(
+            r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$',
+            s,
+            flags=re.IGNORECASE,
+        )
     )
 
 
@@ -2921,7 +3024,7 @@ def _first_exchange_snippets(messages):
             # is asking...", etc.). Assistant rows that carry tool_calls but
             # also contain a substantive answer text are kept — those are
             # agentic first-turn plans that are legitimate title candidates.
-            if m.get('tool_calls') and (not candidate or _looks_invalid_generated_title(candidate)):
+            if m.get('tool_calls') and (not candidate or _is_bad_new_title(candidate)):
                 continue
             if candidate:
                 asst_text = candidate
@@ -2945,7 +3048,7 @@ def _latest_exchange_snippets(messages):
         if role == 'assistant' and not asst_text:
             candidate = _message_text(m.get('content'))
             # Skip tool-call-only preambles
-            if m.get('tool_calls') and (not candidate or _looks_invalid_generated_title(candidate)):
+            if m.get('tool_calls') and (not candidate or _is_bad_new_title(candidate)):
                 continue
             if candidate:
                 asst_text = candidate
@@ -5407,6 +5510,7 @@ def _save_streaming_checkpoint(session):
         session,
         "streaming checkpoint",
         logger_override=logger,
+        scope_skill_modules=False,
     ):
         session.save(skip_index=True)
 
@@ -5825,8 +5929,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         # exchange and then clear the pending prompt. Materialize the current
         # turn at the transcript boundary before the assistant/tool response.
         current_user_msg = {'role': 'user', 'content': msg_text}
-        if source and source != 'webui':
-            current_user_msg['_source'] = source
+        stamp_message_source(current_user_msg, source)
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
             insert_at += 1
@@ -5887,8 +5990,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
-            if source and source != 'webui':
-                display_msg['_source'] = source
+            stamp_message_source(display_msg, source)
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -6404,8 +6506,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
-    if pending_source != 'webui':
-        recovered['_source'] = pending_source
+    stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -6429,6 +6530,22 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     if getattr(session, 'truncation_watermark', None):
         session.truncation_watermark = float(recovered_ts)
     return True
+
+
+def _terminal_turn_duration(session, *, now: float | None = None) -> float | None:
+    """Freeze a valid turn timer before terminal cleanup clears its origin."""
+    started_at = getattr(session, 'pending_started_at', None)
+    try:
+        started = float(started_at)
+        ended = float(time.time() if now is None else now)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(started) or not math.isfinite(ended) or started <= 0:
+        return None
+    elapsed = ended - started
+    if elapsed < 0:
+        return None
+    return round(elapsed, 3)
 
 
 def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | None:
@@ -7387,7 +7504,7 @@ def _run_agent_streaming(
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'error'):
+        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
         event_id = None
         if run_journal is not None:
@@ -7467,6 +7584,10 @@ def _run_agent_streaming(
     _turn_session_identity_tokens = None
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
+    _streaming_hermes_home_override_ctx = (None, None, False)
+    _streaming_skill_home_snapshot = None
+    _restore_streaming_skill_home_modules = False
+    _acquired_streaming_skill_home_patch_lock = False
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -7534,8 +7655,12 @@ def _run_agent_streaming(
             from api.profiles import (
                 filter_runtime_env_for_gateway_parity,
                 patch_skill_home_modules,
+                restore_skill_home_modules,
+                snapshot_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
+                _skill_modules_support_profile_home,
+                _SKILL_HOME_MODULE_PATCH_LOCK,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -7547,6 +7672,10 @@ def _run_agent_streaming(
             _profile_runtime_env = {}
             _safe_profile_runtime_env = {}
             patch_skill_home_modules = None
+            snapshot_skill_home_modules = None
+            restore_skill_home_modules = None
+            _skill_modules_support_profile_home = None
+            _SKILL_HOME_MODULE_PATCH_LOCK = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -7596,6 +7725,7 @@ def _run_agent_streaming(
             session_id,
             _profile_home,
         )
+        _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
         _set_thread_env(**_thread_env)
         # process_complete agent-wakeup wiring (ours-original, Option B): bind
         # this session's HERMES_SESSION_KEY to its WebUI session_id so the
@@ -7611,11 +7741,41 @@ def _run_agent_streaming(
         ensure_agent_runtime_current()
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
+
+        # Full-turn serialization is only needed for static/legacy skill-module
+        # resolution, where process-global skill-module globals are still used.
+        # Dynamic-capable modules continue concurrent execution.
+        _streaming_override_installed = bool(_streaming_hermes_home_override_ctx[2])
+        _streaming_modules_are_dynamic = False
+        if patch_skill_home_modules is not None and snapshot_skill_home_modules is not None:
+            if _streaming_override_installed and _skill_modules_support_profile_home is not None:
+                try:
+                    _streaming_modules_are_dynamic = bool(
+                        _skill_modules_support_profile_home(_profile_home_path)
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to evaluate streaming skill-module home capability for profile %r",
+                        _profile_home,
+                        exc_info=True,
+                    )
+                    _streaming_modules_are_dynamic = False
+
+            if not (_streaming_override_installed and _streaming_modules_are_dynamic):
+                _restore_streaming_skill_home_modules = True
+                _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
+                _acquired_streaming_skill_home_patch_lock = True
+
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
         with _ENV_LOCK:
+            if _restore_streaming_skill_home_modules:
+                # Snapshot and patch before mutating process env so setup
+                # failures can unwind without leaking either state.
+                _streaming_skill_home_snapshot = snapshot_skill_home_modules()
+                patch_skill_home_modules(Path(_profile_home))
             old_profile_env = {key: os.environ.get(key) for key in _safe_profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
@@ -7635,18 +7795,14 @@ def _run_agent_streaming(
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
-                # Patch skill module caches to match the active profile.
-                # _set_hermes_home() does this for process-wide switches
-                # but per-request switches skip it (#1700). The in-chat
-                # cronjob tool is wrapped separately at its tool-call boundary
-                # with cron_profile_context_for_home (#4580) so cron.jobs path
-                # caches are not mutated for the entire agent turn.
-                # Modules were prewarmed by _prewarm_skill_tool_modules()
-                # above, so we only do lightweight sys.modules lookups and
-                # attribute assignments here — no first-time import under
-                # the lock (#2024).
-                if patch_skill_home_modules is not None:
-                    patch_skill_home_modules(Path(_profile_home))
+                # Prefer context-local Hermes-home overrides when available.
+                # In that mode, tools.skills_tool._skills_dir() and
+                # tools.skill_manager_tool._skills_dir() can resolve the active
+                # profile from get_hermes_home() and keep per-thread isolation
+                # without mutating module globals. If override installation
+                # succeeds for both modules, skip process-cache patching.
+                # If either module is static/missing/raises, the legacy path
+                # above has already snapshotted and patched under this lock.
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
@@ -7682,14 +7838,10 @@ def _run_agent_streaming(
             try:
                 from api.route_approvals import (
                     submit_gateway_pending_mirror as _submit_pending_for_polling,
-                    reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
-                    _approval_sse_notify_locked as _approval_sse_notify_locked,
-                    _lock as _approval_lock,
+                    retire_gateway_pending_mirror as _retire_gateway_pending_mirror,
                 )
                 def _cleanup_gateway_pending_mirror():
-                    with _approval_lock:
-                        head, total, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
-                        _approval_sse_notify_locked(session_id, head, total)
+                    _retire_gateway_pending_mirror(session_id)
             except ImportError:
                 _submit_pending_for_polling = None
                 _cleanup_gateway_pending_mirror = None
@@ -7700,7 +7852,8 @@ def _run_agent_streaming(
             def _approval_notify_cb(approval_data):
                 if _submit_pending_for_polling is not None:
                     try:
-                        _submit_pending_for_polling(session_id, approval_data)
+                        head, total = _submit_pending_for_polling(session_id, approval_data)
+                        approval_data = {**(head or approval_data), "pending_count": total}
                     except Exception:
                         logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
                 put('approval', approval_data)
@@ -8115,20 +8268,9 @@ def _run_agent_streaming(
                         if _has_blocking_approval(session_id):
                             p = None
                             with _approval_lock:
-                                _reconcile_gateway_pending_mirror_locked(session_id)
-                                queue = _approval_pending.get(session_id)
-                                if isinstance(queue, list):
-                                    p = dict(queue[0]) if queue else None
-                                elif queue:
-                                    p = dict(queue)
-                                if p is None:
-                                    gw_queue = _approval_gateway_queues.get(session_id) or []
-                                    if gw_queue:
-                                        raw = getattr(gw_queue[0], 'data', None) or {}
-                                        if raw:
-                                            p = dict(raw)
-                                        else:
-                                            logger.warning("Gateway queue entry for %s has no .data attribute", session_id)
+                                p, pending_count, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
+                                if p:
+                                    p = {**p, "pending_count": pending_count}
                             if p:
                                 put('approval', p)
                     except ImportError:
@@ -9531,14 +9673,7 @@ def _run_agent_streaming(
                                     + 'send a message, switch the model/provider, or fix the credentials.'
                                 )
                                 _error_payload['hint'] = _err_hint
-                        # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
-                        _turn_duration_seconds = 0.0
-                        try:
-                            _pending_ts = getattr(s, 'pending_started_at', None)
-                            if _pending_ts:
-                                _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
-                        except Exception:
-                            pass
+                        _turn_duration = _terminal_turn_duration(s)
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
@@ -9558,8 +9693,9 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
-                            '_turnDuration': round(_turn_duration_seconds, 3),
                         }
+                        if _turn_duration is not None:
+                            _error_message['_turnDuration'] = _turn_duration
                         if _err_type == 'compression_exhausted':
                             _recovery = stamp_compression_exhausted_recovery(
                                 s,
@@ -9811,6 +9947,11 @@ def _run_agent_streaming(
                     requested_model=resolved_model or model,
                     requested_provider=resolved_provider,
                 )
+                # #6068: the served model must be read AFTER agent.run — the agent
+                # mutates agent.model when a fallback fires, so the pre-run
+                # resolved_model would mis-attribute exactly the turns where
+                # attribution matters most.
+                _used_model = getattr(agent, 'model', None) or resolved_model or model
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -9827,6 +9968,8 @@ def _run_agent_streaming(
                             _ttft_ms = meter().get_ttft_ms(stream_id)
                             if _ttft_ms is not None:
                                 _dm['_firstTokenMs'] = _ttft_ms
+                            if _used_model:
+                                _dm['_usedModel'] = _used_model
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -10214,6 +10357,8 @@ def _run_agent_streaming(
             _ttft_ms = meter().get_ttft_ms(stream_id)
             if _ttft_ms is not None:
                 usage['ttft_ms'] = _ttft_ms
+            if _used_model:
+                usage['used_model'] = _used_model
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
@@ -10764,14 +10909,7 @@ def _run_agent_streaming(
                             + 'send a message, switch the model/provider, or fix the credentials.'
                         )
                         _error_payload['hint'] = _exc_hint
-                # Freeze turn duration before terminal cleanup clears pending_started_at (#6309)
-                _turn_duration_seconds = 0.0
-                try:
-                    _pending_ts = getattr(s, 'pending_started_at', None)
-                    if _pending_ts:
-                        _turn_duration_seconds = max(0.0, time.time() - float(_pending_ts))
-                except Exception:
-                    pass
+                _turn_duration = _terminal_turn_duration(s)
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -10787,8 +10925,9 @@ def _run_agent_streaming(
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                     'timestamp': int(time.time()),
                     '_error': True,
-                    '_turnDuration': round(_turn_duration_seconds, 3),
                 }
+                if _turn_duration is not None:
+                    _error_message['_turnDuration'] = _turn_duration
                 if _exc_type == 'compression_exhausted':
                     _recovery = stamp_compression_exhausted_recovery(
                         s,
@@ -10858,6 +10997,19 @@ def _run_agent_streaming(
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
+        if _restore_streaming_skill_home_modules and _streaming_skill_home_snapshot is not None:
+            with _ENV_LOCK:
+                if restore_skill_home_modules is not None:
+                    try:
+                        restore_skill_home_modules(_streaming_skill_home_snapshot)
+                    except Exception:
+                        logger.debug("Failed to restore skill module state for streaming profile", exc_info=True)
+                _streaming_skill_home_snapshot = None
+                _restore_streaming_skill_home_modules = False
+        if _acquired_streaming_skill_home_patch_lock:
+            _SKILL_HOME_MODULE_PATCH_LOCK.release()
+            _acquired_streaming_skill_home_patch_lock = False
+        _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
@@ -10874,6 +11026,9 @@ def _run_agent_streaming(
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
             unregister_active_run(stream_id)
+            # Clean up the stream-owner registry so stale stream_id→session_id
+            # mappings do not accumulate over thousands of completed streams (#6351).
+            unregister_stream_owner(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`
@@ -11308,8 +11463,7 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            if _pending_source and _pending_source != 'webui':
-                                _user_turn['_source'] = _pending_source
+                            stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
