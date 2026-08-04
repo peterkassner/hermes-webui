@@ -74,8 +74,8 @@ def test_position_fn_has_phone_reparent_branch():
         ".composer-footer containing block (#6080)"
     )
     assert "model-dropdown--floating" in body, "phone path must apply the floating class"
-    # PR #6105 visual-viewport math must be preserved.
-    assert "window.visualViewport" in body
+    assert "window.visualViewport" not in body
+    assert "window.innerWidth" in body and "window.innerHeight" in body
     assert "titlebar" in body and "app-titlebar" in body, "titlebar clamp preserved"
     assert "openAbove" in body, "above/below flip preserved"
     assert "menuWidth" in body and "margin*2" in body, "width=viewport-16px preserved"
@@ -88,11 +88,11 @@ def test_close_restores_home_parent():
     )
 
 
-def test_raf_coalesced_visualviewport_listeners_present():
-    assert "_repositionOpenModelDropdown" in UI_JS
-    assert "requestAnimationFrame" in _function_body(UI_JS, "function _repositionOpenModelDropdown(")
-    assert "window.visualViewport.addEventListener('resize',_repositionOpenModelDropdown)" in UI_JS
-    assert "window.visualViewport.addEventListener('scroll',_repositionOpenModelDropdown)" in UI_JS
+def test_visual_viewport_does_not_reposition_the_model_dropdown():
+    """The experiment leaves virtual-keyboard and viewport geometry to the browser."""
+    assert "_repositionOpenModelDropdown" not in UI_JS
+    assert "visualViewport.addEventListener('resize'" not in UI_JS
+    assert "visualViewport.addEventListener('scroll'" not in UI_JS
 
 
 # ── Load-bearing DOM-parentage guard (executed in node) ──────────────────────

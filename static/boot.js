@@ -156,61 +156,6 @@ function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
 }
 
-function _isPhoneWidthViewport(){
-  return window.matchMedia('(max-width: 640px)').matches;
-}
-
-function _isTouchKeyboardViewport(){
-  // The manual inset is a phone-layout workaround. iPadOS already pans a
-  // focused field in its wide/tablet layout; applying both adjustments creates
-  // a giant composer padding block and jumps the document upward.
-  try{return _isPhoneWidthViewport()&&matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
-}
-
-function _syncKeyboardBottomInset(){
-  const root=document.documentElement;
-  if(!root) return;
-  if(!window.visualViewport||!_isTouchKeyboardViewport()){
-    root.style.removeProperty('--keyboard-bottom-inset');
-    return;
-  }
-  const vv=window.visualViewport;
-  // A pinch-zoomed viewport (vv.scale != 1) makes innerHeight - vv.height
-  // reflect the zoom, not the keyboard — on Chromium touch devices with
-  // accessibility "force enable zoom" that yields a large spurious inset that
-  // jitters on pan. Treat only the unzoomed state as keyboard occlusion.
-  if(Math.abs((vv.scale||1)-1)>0.05){
-    root.style.removeProperty('--keyboard-bottom-inset');
-    return;
-  }
-  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
-  if(inset>0){
-    root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
-  }else{
-    root.style.removeProperty('--keyboard-bottom-inset');
-  }
-}
-
-// Mobile PWA viewport reflow guard. When the on-screen keyboard / browser
-// chrome shows or hides, visualViewport (or a plain resize on browsers without
-// it) changes height without a layout invalidation, leaving the phone layout
-// painted against stale geometry. Toggling a one-frame `viewport-reflow` class
-// (which applies a cheap GPU-promotion transform under the @media(max-width:640px)
-// rule) forces a repaint, then we resync the workspace panel + sidebar aria.
-function _forceMobileViewportReflow(){
-  _syncKeyboardBottomInset();
-  if(!_isPhoneWidthViewport()) return;
-  const layout=document.querySelector('.layout');
-  if(!layout) return;
-  document.documentElement.classList.add('viewport-reflow');
-  void layout.offsetWidth;
-  requestAnimationFrame(()=>{
-    document.documentElement.classList.remove('viewport-reflow');
-    try{ syncWorkspacePanelState(); }catch(_){ }
-    try{ if(typeof _syncSidebarAria==='function') _syncSidebarAria(); }catch(_){ }
-  });
-}
-
 function _syncWorkspacePanelInlineWidth(){
   const {panel}= _workspacePanelEls();
   if(!panel) return;
@@ -2357,12 +2302,9 @@ $('msg').addEventListener('keydown',e=>{
   }
   // Send key: respect user preference.
   // On touch-primary devices (coarse pointer, no fine pointer co-existing),
-  // default to Enter = newline regardless of whether the visual viewport has
-  // shrunk. The viewport-shrink heuristic (_isVirtualKeyboardLikelyOpen) was
-  // unreliable on iOS Safari and some Android browsers where the keyboard
-  // doesn't consistently reduce vv.height by >120px. The pointer media query
-  // pair is a sufficient and more reliable signal for "software keyboard only".
-  // Hardware keyboards on tablets are covered by _hasFinePointerCoexisting.
+  // default to Enter = newline. The pointer media query pair is a reliable
+  // signal for a touch-first editor; hardware keyboards on tablets are covered
+  // by _hasFinePointerCoexisting.
   // The 'ctrl+enter' and 'shift+enter' settings also use this behavior
   // (plain Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
@@ -2556,25 +2498,7 @@ function applyEmptyStatePanelPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
-  if(!window.visualViewport) _forceMobileViewportReflow();
 });
-
-// On PWAs / mobile browsers that expose visualViewport, keyboard show/hide and
-// URL-bar collapse fire visualViewport resize/scroll rather than window resize.
-// Debounce a reflow so the phone layout repaints against the new geometry.
-if(window.visualViewport){
-  _syncKeyboardBottomInset();
-  let _mobileViewportReflowTimer=0;
-  const _scheduleMobileViewportReflow=()=>{
-    if(_mobileViewportReflowTimer) clearTimeout(_mobileViewportReflowTimer);
-    _mobileViewportReflowTimer=setTimeout(()=>{
-      _mobileViewportReflowTimer=0;
-      _forceMobileViewportReflow();
-    },60);
-  };
-  window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
-  window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
-}
 
 // Boot: restore last session or start fresh
 // ── Resizable panels ──────────────────────────────────────────────────────
@@ -3813,7 +3737,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 // chrome aren't left in the stale bfcache snapshot.
 window.addEventListener('pageshow', async (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
-  _syncKeyboardBottomInset();
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();

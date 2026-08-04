@@ -3256,10 +3256,6 @@ function _refreshOpenModelDropdown(){
   }
   const sdd=$('settingsModelDropdown');
   if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
-    // Re-rendering the OPEN settings picker (e.g. when a late live-model fetch
-    // resolves) must not re-grab search focus on touch — same coarse-pointer rule
-    // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
-    const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
     renderModelDropdown({
       dropdownId:'settingsModelDropdown',
       selectId:'settingsModel',
@@ -3267,7 +3263,6 @@ function _refreshOpenModelDropdown(){
       closeDropdown:closeSettingsModelDropdown,
       selectModel:selectSettingsModelFromDropdown,
       scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-      autoFocusSearch:!_coarsePointer,
     });
   }
 }
@@ -3871,24 +3866,23 @@ function _positionModelDropdown(){
     // #6080: .composer-footer sets container-type:inline-size (and a
     // backdrop-filter under the Geist Contrast skin) — both establish a fixed
     // containing block, so a position:fixed dropdown left inside the footer
-    // resolves against the FOOTER (bottom of screen) instead of the viewport
-    // and lands below the fold. Reparent to <body> — exactly the working
-    // #profileDropdown idiom — so position:fixed is viewport-relative on ALL
-    // skins, then compute coordinates against the visual viewport.
+    // resolves against the FOOTER (bottom of screen) instead of the viewport.
+    // Reparent to <body> so the fixed dropdown is viewport-relative on all skins.
     if(!_modelDropdownHome){
       _modelDropdownHome={parent:dd.parentNode,nextSibling:dd.nextSibling};
     }
     if(dd.parentNode!==document.body) document.body.appendChild(dd);
     dd.classList.add('model-dropdown--floating');
     const anchorRect=anchor.getBoundingClientRect();
-    const visualViewport=window.visualViewport;
-    const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
-    const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
-    const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);
+    // Use the layout viewport only; dropdown placement is independent of OS
+    // virtual-keyboard geometry.
+    const viewportWidth=Math.max(1,window.innerWidth||1);
+    const viewportHeight=Math.max(1,window.innerHeight||1);
+    const viewportTop=0;
     const viewportBottom=viewportTop+viewportHeight;
     const margin=8;
     const gap=6;
-    const viewportLeft=Math.max(0,Number(visualViewport&&visualViewport.offsetLeft)||0);
+    const viewportLeft=0;
     const viewportRight=viewportLeft+viewportWidth;
     const titlebar=document.querySelector('.app-titlebar');
     const titlebarBottom=titlebar&&typeof titlebar.getBoundingClientRect==='function'
@@ -4091,9 +4085,7 @@ function renderModelDropdown(){
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  // Whether the search input should auto-grab focus on (re-)render. Default true
-  // preserves the composer picker's behavior exactly; the settings picker passes
-  // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
+  // Whether the search input should auto-grab focus on (re-)render. Default true.
   const _autoFocusSearch=opts.autoFocusSearch!==false;
   const selectFromDropdown=typeof opts.selectModel==='function'
     ? opts.selectModel
@@ -4379,9 +4371,7 @@ function renderModelDropdown(){
     return row;
   };
   const _filterModels=(term)=>{
-    // Preserve focus across the re-render if the search input already had it — so a
-    // touch user typing a query (where autoFocusSearch is suppressed to avoid the
-    // initial keyboard pop) doesn't lose focus mid-word on each keystroke re-render.
+    // Preserve focus across the re-render when the search input already had it.
     const _hadFocus=(typeof document!=='undefined')&&document.activeElement===_si;
     term=term.trim().toLowerCase();
     const hasSearch=!!term;
@@ -4774,11 +4764,6 @@ function openSettingsModelDropdown(){
   const sel=$('settingsModel');
   const chip=$('settingsModelChip');
   if(!dd||!sel) return;
-  // Auto-focus the search on desktop only. On touch (coarse pointer) grabbing focus
-  // pops the on-screen keyboard the instant the chip is tapped — the composer picker
-  // doesn't do it either, so match that behavior on touch. Computed before render so
-  // renderModelDropdown's own initial focus is suppressed too (not just the outer one).
-  const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
   renderModelDropdown({
     dropdownId:'settingsModelDropdown',
     selectId:'settingsModel',
@@ -4786,19 +4771,16 @@ function openSettingsModelDropdown(){
     closeDropdown:closeSettingsModelDropdown,
     selectModel:selectSettingsModelFromDropdown,
     scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-    autoFocusSearch:!_coarsePointer,
   });
   dd.classList.add('open');
   if(chip){
     chip.classList.add('active');
     chip.setAttribute('aria-expanded','true');
   }
-  if(!_coarsePointer){
-    setTimeout(()=>{
-      const input=dd.querySelector('.model-search-input');
-      if(input) input.focus();
-    },0);
-  }
+  setTimeout(()=>{
+    const input=dd.querySelector('.model-search-input');
+    if(input) input.focus();
+  },0);
 }
 
 function toggleSettingsModelDropdown(){
@@ -4850,26 +4832,6 @@ window.addEventListener('resize',()=>{
     _positionReasoningDropdown();
   }
 });
-
-// visualViewport resize/scroll fire on mobile when the on-screen keyboard opens
-// or the URL bar collapses/expands — the phone dropdown is fixed to the visual
-// viewport, so it must be re-measured against the new offsets. Coalesce with rAF
-// so a burst of scroll/resize events triggers at most one reposition per frame.
-let _modelDropdownRepositionScheduled=false;
-function _repositionOpenModelDropdown(){
-  const dd=$('composerModelDropdown');
-  if(!(dd&&dd.classList.contains('open'))||_modelDropdownRepositionScheduled) return;
-  _modelDropdownRepositionScheduled=true;
-  requestAnimationFrame(()=>{
-    _modelDropdownRepositionScheduled=false;
-    const openDd=$('composerModelDropdown');
-    if(openDd&&openDd.classList.contains('open')) _positionModelDropdown();
-  });
-}
-if(window.visualViewport){
-  window.visualViewport.addEventListener('resize',_repositionOpenModelDropdown);
-  window.visualViewport.addEventListener('scroll',_repositionOpenModelDropdown);
-}
 
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:

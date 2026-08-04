@@ -1057,8 +1057,8 @@ def test_safe_area_variables_available_for_pwa_shell():
     assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS, (
         "CSS must expose env(safe-area-inset-top) through --app-titlebar-safe-top"
     )
-    assert "padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important" in CSS, (
-        "Phone composer should keep the proven pre-cover-mode padding contract"
+    assert "padding:8px 10px 12px!important" in CSS, (
+        "Phone composer must use static padding; the OS owns virtual-keyboard geometry"
     )
 
 
@@ -1546,107 +1546,35 @@ def test_mobile_composer_primary_controls_keep_touch_friendly_sizing():
 
 # ── Input zoom prevention ─────────────────────────────────────────────────────
 
-def test_composer_textarea_font_size_mobile():
-    """Composer textarea must have font-size >= 16px on mobile.
-
-    iOS Safari zooms the viewport when an input with font-size < 16px is focused,
-    which breaks the layout. The composer textarea must be >= 16px at mobile widths.
-    """
-    # Check for 16px font-size on the textarea in a mobile breakpoint
-    assert re.search(r'font-size:16px', CSS), \
-        "Composer textarea must have font-size:16px at mobile widths to prevent iOS zoom-on-focus"
+def test_mobile_composer_font_size_is_not_special_cased_for_ios_zoom():
+    """The experiment uses the normal composer type scale on every form factor."""
+    assert "textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:14px" in CSS
 
 
-def test_touch_device_inputs_meet_zoom_threshold():
-    """All input/textarea/select must clear iOS Safari's 16px zoom threshold
-    on touch-primary devices, not just the composer textarea (#1167).
+def test_touch_device_inputs_are_not_special_cased_for_ios_zoom():
+    """The OS/browser owns focus zoom behavior; WebUI adds no touch-only font floor."""
+    assert "input,textarea,select{font-size:max(16px,1em)!important;}" not in CSS
 
-    This locks the global media-query floor so future per-element font-size
-    tweaks (sidebar search 13px, settings selects 12px, dialog inputs 14px,
-    onboarding fields 13px) cannot accidentally re-introduce auto-zoom.
-    """
-    # The hover:none + pointer:coarse pair is the canonical touch-primary
-    # detection (won't match desktop with mouse, won't match touch laptops
-    # that report hover:hover).
-    pattern = re.compile(
-        r'@media\s*\(hover:none\)\s*and\s*\(pointer:coarse\)\s*\{[^}]*'
-        r'input\s*,\s*textarea\s*,\s*select\s*\{[^}]*'
-        r'font-size:\s*max\(\s*16px',
-        re.DOTALL,
+
+def test_virtual_keyboard_geometry_compensation_is_absent():
+    """WebUI must leave virtual-keyboard geometry entirely to the OS/browser."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    css = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    for marker in (
+        "_syncKeyboardBottomInset",
+        "_isTouchKeyboardViewport",
+        "_forceMobileViewportReflow",
+        "--keyboard-bottom-inset",
+        "viewport-reflow",
+    ):
+        assert marker not in boot_js + css, f"virtual-keyboard compensation remains: {marker}"
+    assert "_repositionOpenModelDropdown" not in ui_js, (
+        "model picker must not react to visualViewport keyboard changes"
     )
-    assert pattern.search(CSS), (
-        "style.css must contain a (hover:none) and (pointer:coarse) media "
-        "query that bumps input/textarea/select to font-size:max(16px,…) "
-        "so iOS Safari does not auto-zoom on focus (#1167)"
+    assert "window.visualViewport" not in ui_js, (
+        "model picker must use only layout-viewport geometry"
     )
-
-
-def test_touch_keyboard_inset_uses_phone_touch_media_query():
-    """Manual keyboard padding is safe only in the phone layout, never wide iPad."""
-    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "function _isTouchKeyboardViewport()" in boot_js, \
-        "boot.js must define a touch-keyboard viewport predicate"
-    assert "_isPhoneWidthViewport()" in boot_js, \
-        "keyboard inset eligibility must exclude the wide/tablet layout"
-    assert "matchMedia('(hover:none) and (pointer:coarse)')" in boot_js or \
-        'matchMedia("(hover:none) and (pointer:coarse)")' in boot_js, \
-        "phone keyboard inset eligibility must use the touch-primary media query"
-    assert "any-pointer:fine" in boot_js, \
-        "touch keyboard inset eligibility must exclude co-existing fine-pointer setups"
-    assert "!_hasFinePointerCoexisting()" in boot_js, \
-        "touch keyboard inset eligibility must skip hardware-keyboard/trackpad devices"
-
-
-def test_touch_keyboard_inset_writes_and_clears_css_variable():
-    """visualViewport geometry must write and clear the keyboard inset variable."""
-    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "setProperty('--keyboard-bottom-inset'" in boot_js, \
-        "boot.js must write --keyboard-bottom-inset on touch keyboard viewport changes"
-    assert "removeProperty('--keyboard-bottom-inset')" in boot_js, \
-        "boot.js must clear --keyboard-bottom-inset when the inset is zero or ineligible"
-    assert "Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)))" in boot_js, \
-        "boot.js must compute the bottom inset from innerHeight and visualViewport geometry"
-
-
-def test_touch_keyboard_inset_ignores_pinch_zoom_scale():
-    """A pinch-zoomed viewport (vv.scale != 1) must not be read as keyboard
-    occlusion — otherwise Chromium 'force enable zoom' produces a large spurious
-    inset that jitters on pan (#5738 UX-gate hardening)."""
-    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "vv.scale" in boot_js, \
-        "boot.js must consult visualViewport.scale before treating shrinkage as keyboard occlusion"
-    assert "Math.abs((vv.scale||1)-1)>0.05" in boot_js, \
-        "boot.js must bail out of the inset when the viewport is pinch-zoomed"
-
-
-def test_touch_keyboard_inset_primes_during_visual_viewport_setup():
-    """The existing visualViewport setup path must prime the inset immediately."""
-    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    setup_start = boot_js.index("if(window.visualViewport){")
-    setup_end = boot_js.index("window.visualViewport.addEventListener('resize'", setup_start)
-    setup_block = boot_js[setup_start:setup_end]
-    assert "_syncKeyboardBottomInset();" in setup_block, \
-        "boot.js must sync the keyboard inset once during visualViewport setup"
-
-
-def test_touch_keyboard_inset_primes_on_pageshow_restore():
-    """BFCache restore must resync the inset before restore work continues."""
-    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    pageshow_start = boot_js.index("window.addEventListener('pageshow'")
-    pageshow_end = boot_js.index("const _srch = document.getElementById('sessionSearch');", pageshow_start)
-    pageshow_block = boot_js[pageshow_start:pageshow_end]
-    assert "_syncKeyboardBottomInset();" in pageshow_block, \
-        "boot.js must sync the keyboard inset during pageshow restore"
-
-
-def test_touch_keyboard_inset_applies_to_phone_composer_padding_only():
-    """Wide iPad must not receive the phone keyboard-padding workaround."""
-    css_ns = re.sub(r'\s+', '', CSS)
-    assert "@media(max-width:640px)and(hover:none)and(pointer:coarse)" in css_ns, \
-        "style.css must scope keyboard inset padding to the phone layout"
-    assert ".composer-wrap{padding-bottom:calc(14px+var(--keyboard-bottom-inset,0px));}" in css_ns, \
-        "phone composer must add the keyboard inset to its bottom padding"
-
 
 
 # ── Sidebar tabs on mobile ───────────────────────────────────────────────────

@@ -2589,7 +2589,7 @@
   @media (hover: hover) {
     .attach-thumb:hover{filter:brightness(1.05);transform:scale(1.04);}
   }
-  textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
+  textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:14px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
   textarea#msg::placeholder{color:var(--muted);}
   .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;container-type:inline-size;container-name:composer-footer;}
   .composer-left{display:flex;align-items:center;gap:4px;min-width:0;flex:1;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
@@ -3040,12 +3040,6 @@
   }
 
   @media(max-width:640px){
-    /* Mobile PWA reflow guard (#3976): a one-frame GPU-promotion transform that
-       _forceMobileViewportReflow() toggles via html.viewport-reflow to force a
-       repaint after visualViewport/keyboard geometry changes. overflow-x:clip
-       (NOT hidden) suppresses any horizontal overflow without coercing
-       overflow-y into a scroll container — same #4856 lesson applied to .layout. */
-    html.viewport-reflow .layout{transform:translateZ(0);}
     .layout{overflow-x:clip;}
     /* Viewport-phone rules handle app chrome and touch sizing; they intentionally
        overlap the container compact rules for actual phones. */
@@ -3110,7 +3104,7 @@
     .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
-    .composer-wrap{padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}
+    .composer-wrap{padding:8px 10px 12px!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
@@ -3495,10 +3489,6 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 /* Composer wrap: slightly less padding on smaller heights */
 .composer-wrap{padding:10px 20px 14px;position:relative;z-index:10;}
 .composer-wrap::before{content:"";position:absolute;left:0;right:0;bottom:100%;height:32px;background:linear-gradient(to bottom,transparent,var(--bg));pointer-events:none;}
-
-@media (max-width:640px) and (hover:none) and (pointer:coarse){
-  .composer-wrap{padding-bottom:calc(14px + var(--keyboard-bottom-inset, 0px));}
-}
 
 /* Cron status badges: pill shape refinement */
 .cron-status{border-radius:99px;font-size:10px;letter-spacing:.04em;}
@@ -6586,17 +6576,6 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .queue-pill:hover{background:color-mix(in srgb,var(--hover-bg) 60%,var(--surface));}
   .queue-pill-count{color:var(--text);}
   .queue-pill-chevron{margin-left:auto;opacity:.5;}
-
-/* ── Mobile: prevent iOS auto-zoom on input focus ─────────────────────────
-   iOS Safari zooms in when a focused input/select has font-size < 16px.
-   This media query targets touch-primary devices (phones and tablets) and
-   bumps all interactive inputs to the minimum non-zoom threshold.
-   The textarea#msg composer is already 16px; the sidebar search, rename
-   inputs, settings selects, and dialog inputs are not.  (#1167)
-──────────────────────────────────────────────────────────────────────── */
-@media (hover:none) and (pointer:coarse){
-  input,textarea,select{font-size:max(16px,1em)!important;}
-}
 
 /* ── PDF preview ─────────────────────────────────────────────────────────── */
 .pdf-preview-wrap{border:1px solid var(--border);border-radius:6px;overflow:hidden;margin:4px 0;background:var(--surface);}
