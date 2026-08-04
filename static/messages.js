@@ -8614,6 +8614,39 @@ function _showPwaNotification(title,body,options={}){
   }
   return Promise.resolve(direct());
 }
+function _webPushSupported(){
+  return !!(window.isSecureContext&&navigator.serviceWorker&&window.PushManager&&('Notification' in window));
+}
+function _webPushCapability(){
+  if(window._webPushCapabilityPromise) return window._webPushCapabilityPromise;
+  window._webPushCapabilityPromise=fetch(new URL('api/web-push/capability',document.baseURI||location.href),{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():{enabled:false,public_key:''})
+    .catch(()=>({enabled:false,public_key:''}));
+  return window._webPushCapabilityPromise;
+}
+function _b64uToUint8Array(value){
+  const padded=String(value||'').replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(String(value||'').length/4)*4,'=');
+  const raw=atob(padded),out=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) out[i]=raw.charCodeAt(i);
+  return out;
+}
+// Fetch this before the user taps; Safari requires permission/subscription flow
+// to originate from the user gesture, not from a network round-trip.
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',()=>{_webPushCapability();},{once:true});
+else _webPushCapability();
+async function enableWebPush(){
+  if(!_webPushSupported()) throw new Error('Web Push requires a secure, supported browser context.');
+  // Must be invoked directly from the button's user gesture on iOS.
+  const permission=await requestNotificationPermission();
+  if(permission!=='granted') return permission;
+  const capability=await _webPushCapability();
+  if(!capability.enabled||!capability.public_key) throw new Error('Web Push is not configured on this server.');
+  const registration=await navigator.serviceWorker.ready;
+  const subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:_b64uToUint8Array(capability.public_key)});
+  const response=await fetch(new URL('api/web-push/subscribe',document.baseURI||location.href),{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({subscription:subscription.toJSON()})});
+  if(!response.ok) throw new Error((await response.text())||'Web Push subscription failed.');
+  return 'granted';
+}
 function requestNotificationPermission(){
   if(!('Notification' in window)){
     if(typeof showToast==='function') showToast(t('notifications_unsupported'),3000,'error');

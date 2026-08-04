@@ -12439,6 +12439,10 @@ def handle_get(handler, parsed) -> bool:
             days = 7
         return j(handler, get_provider_cost_history(provider_id, days))
 
+    if parsed.path == "/api/web-push/capability":
+        from api.web_push import capability
+        return j(handler, capability(), extra_headers={"Cache-Control": "no-store"})
+
     if parsed.path == "/api/settings":
         settings = load_settings()
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
@@ -15657,6 +15661,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     # ── Settings (POST) ──
+    if parsed.path == "/api/web-push/subscribe":
+        from api.web_push import save_subscription
+        try:
+            return j(handler, save_subscription(body.get("subscription")), extra_headers={"Cache-Control": "no-store"})
+        except ValueError as exc:
+            return bad(handler, str(exc))
+        except RuntimeError as exc:
+            return bad(handler, str(exc), 503)
+
+    if parsed.path == "/api/web-push/unsubscribe":
+        from api.web_push import remove_subscription
+        try:
+            return j(handler, remove_subscription(body.get("endpoint")), extra_headers={"Cache-Control": "no-store"})
+        except ValueError as exc:
+            return bad(handler, str(exc))
+
     if parsed.path == "/api/settings":
         from api.auth import (
             create_session,

@@ -174,6 +174,22 @@ self.addEventListener('fetch', (event) => {
 });
 
 
+self.addEventListener('push', (event) => {
+  // Safari/iOS requires every push event to produce a visible notification.
+  let payload = {};
+  try { payload = event.data ? event.data.json() : {}; } catch (_e) {}
+  const title = String(payload.title || 'Hermes');
+  const options = {
+    body: String(payload.body || 'Hermes has an update.'),
+    icon: 'static/favicon-192.png',
+    badge: 'static/favicon-32.png',
+    tag: String(payload.tag || 'hermes-webui'),
+    renotify: false,
+    data: {url: String(payload.url || './')},
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const rawUrl = (event.notification.data && event.notification.data.url) || './';

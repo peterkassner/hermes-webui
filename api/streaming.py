@@ -10579,6 +10579,27 @@ def _run_agent_streaming(
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
+                # Web Push wakes installed iOS PWAs after their document has been
+                # suspended. It is intentionally terminal-only and always visible:
+                # Safari revokes subscriptions for invisible push events.
+                if load_settings().get('notifications_enabled'):
+                    try:
+                        from api.web_push import send_notification
+                        answer = next(
+                            (str(message.get('content') or '').replace('\n', ' ').strip()
+                             for message in reversed(s.messages or [])
+                             if isinstance(message, dict) and message.get('role') == 'assistant'),
+                            '',
+                        )
+                        session_title = str(getattr(s, 'title', '') or '').strip()
+                        send_notification(
+                            title=session_title or 'Response complete',
+                            body=(answer[:180] + ('…' if len(answer) > 180 else '')) or 'Task finished.',
+                            url='./',
+                            profile=getattr(s, 'profile', None),
+                        )
+                    except Exception:
+                        logger.warning("Web Push completion delivery failed for %s", session_id, exc_info=True)
                 # Emit one last metering packet for the live message-header TPS label.
                 meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id

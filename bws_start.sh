@@ -54,6 +54,39 @@ PY
   export BWS_ACCESS_TOKEN
 fi
 
+# Read one opaque BWS secret ID without sourcing ~/.hermes/.env, which contains
+# unrelated credentials. Returns empty when the optional integration is absent.
+bws_secret_id() {
+  local value_var="$1"
+  local id_var="${value_var}_SECRET_ID"
+  local secret_id="${!id_var:-}"
+  if [[ -z "$secret_id" && -r "$HOME/.hermes/.env" ]]; then
+    secret_id="$(grep -E "^[[:space:]]*${id_var}=" "$HOME/.hermes/.env" | tail -n 1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+  fi
+  printf '%s' "$secret_id"
+}
+
+# Resolve a configured BWS secret. Callers decide whether the integration is
+# mandatory; WebUI authentication is mandatory, Web Push is not.
+resolve_bws_secret() {
+  local value_var="$1"
+  local secret_id
+  secret_id="$(bws_secret_id "$value_var")"
+  if [[ -z "$secret_id" ]]; then
+    err "${value_var}_SECRET_ID is not set."
+    return 1
+  fi
+  require_cmd bws
+  require_cmd jq
+  local value
+  value="$(bws secret get "$secret_id" | jq -er '.value // empty')" || {
+    err "Could not retrieve ${value_var} from Bitwarden Secrets Manager."
+    return 1
+  }
+  printf -v "$value_var" '%s' "$value"
+  export "$value_var"
+}
+
 # Source of truth: Hermes/BWS-managed HERMES_WEBUI_PW.
 # The WebUI itself expects HERMES_WEBUI_PASSWORD, so this launcher maps PW -> PASSWORD.
 # Do not treat a pre-existing HERMES_WEBUI_PASSWORD as authoritative; that creates
@@ -74,6 +107,25 @@ if [[ -z "${HERMES_WEBUI_PW:-}" ]]; then
 fi
 
 export HERMES_WEBUI_PASSWORD="$HERMES_WEBUI_PW"
+# Web Push is optional. An unavailable or partially configured VAPID pair must
+# disable notifications, never prevent the authenticated WebUI from starting.
+if [[ -n "${HERMES_WEBUI_VAPID_PUBLIC_KEY:-}" || -n "${HERMES_WEBUI_VAPID_PRIVATE_KEY:-}" ]]; then
+  if [[ -z "${HERMES_WEBUI_VAPID_PUBLIC_KEY:-}" || -z "${HERMES_WEBUI_VAPID_PRIVATE_KEY:-}" ]]; then
+    unset HERMES_WEBUI_VAPID_PUBLIC_KEY HERMES_WEBUI_VAPID_PRIVATE_KEY
+    err "Web Push disabled: only one VAPID key was provided."
+  fi
+else
+  vapid_public_id="$(bws_secret_id HERMES_WEBUI_VAPID_PUBLIC_KEY)"
+  vapid_private_id="$(bws_secret_id HERMES_WEBUI_VAPID_PRIVATE_KEY)"
+  if [[ -z "$vapid_public_id" && -z "$vapid_private_id" ]]; then
+    log "Web Push disabled: VAPID secret IDs are not configured."
+  elif [[ -z "$vapid_public_id" || -z "$vapid_private_id" ]]; then
+    err "Web Push disabled: VAPID secret IDs are incomplete."
+  elif ! resolve_bws_secret HERMES_WEBUI_VAPID_PUBLIC_KEY || ! resolve_bws_secret HERMES_WEBUI_VAPID_PRIVATE_KEY; then
+    unset HERMES_WEBUI_VAPID_PUBLIC_KEY HERMES_WEBUI_VAPID_PRIVATE_KEY
+    err "Web Push disabled: VAPID secrets could not be resolved."
+  fi
+fi
 # bootstrap.py normally loads repo .env and overwrites existing values. Preserve
 # the BWS-resolved password so stale local .env cannot cause invalid logins.
 export HERMES_WEBUI_PRESERVE_ENV=1
