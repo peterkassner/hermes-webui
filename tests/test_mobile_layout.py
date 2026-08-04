@@ -1008,6 +1008,13 @@ def test_100dvh_viewport_height():
         "style.css must use 100dvh for correct mobile viewport height (100vh hides content under address bar)"
 
 
+def test_ios_pwa_shell_uses_stable_layout_height_not_dvh():
+    """iPadOS must not collapse the whole flex shell on composer focus."""
+    css_ns = re.sub(r'\s+', '', CSS)
+    assert ".pwa-iosbody{height:100vh;}" in css_ns, \
+        "iOS PWA body must override the global 100dvh shell with stable 100vh"
+
+
 def test_viewport_disables_page_zoom_for_native_pwa_shell():
     """Installed PWA launches should not rubber-band into browser-style page zoom."""
     assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
@@ -1572,14 +1579,16 @@ def test_touch_device_inputs_meet_zoom_threshold():
     )
 
 
-def test_touch_keyboard_inset_uses_touch_primary_media_query():
-    """The keyboard inset path must key off touch-primary media queries."""
+def test_touch_keyboard_inset_uses_phone_touch_media_query():
+    """Manual keyboard padding is safe only in the phone layout, never wide iPad."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
     assert "function _isTouchKeyboardViewport()" in boot_js, \
         "boot.js must define a touch-keyboard viewport predicate"
+    assert "_isPhoneWidthViewport()" in boot_js, \
+        "keyboard inset eligibility must exclude the wide/tablet layout"
     assert "matchMedia('(hover:none) and (pointer:coarse)')" in boot_js or \
         'matchMedia("(hover:none) and (pointer:coarse)")' in boot_js, \
-        "touch keyboard inset eligibility must use the hover:none + pointer:coarse media query"
+        "phone keyboard inset eligibility must use the touch-primary media query"
     assert "any-pointer:fine" in boot_js, \
         "touch keyboard inset eligibility must exclude co-existing fine-pointer setups"
     assert "!_hasFinePointerCoexisting()" in boot_js, \
@@ -1628,13 +1637,13 @@ def test_touch_keyboard_inset_primes_on_pageshow_restore():
         "boot.js must sync the keyboard inset during pageshow restore"
 
 
-def test_touch_keyboard_inset_applies_to_composer_padding():
-    """Touch/coarse composer padding must consume the keyboard inset variable."""
+def test_touch_keyboard_inset_applies_to_phone_composer_padding_only():
+    """Wide iPad must not receive the phone keyboard-padding workaround."""
     css_ns = re.sub(r'\s+', '', CSS)
-    assert "@media(hover:none)and(pointer:coarse)" in css_ns, \
-        "style.css must scope the keyboard inset padding to touch-primary viewports"
+    assert "@media(max-width:640px)and(hover:none)and(pointer:coarse)" in css_ns, \
+        "style.css must scope keyboard inset padding to the phone layout"
     assert ".composer-wrap{padding-bottom:calc(14px+var(--keyboard-bottom-inset,0px));}" in css_ns, \
-        "style.css must add the keyboard inset to composer bottom padding"
+        "phone composer must add the keyboard inset to its bottom padding"
 
 
 

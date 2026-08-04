@@ -161,7 +161,10 @@ function _isPhoneWidthViewport(){
 }
 
 function _isTouchKeyboardViewport(){
-  try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
+  // The manual inset is a phone-layout workaround. iPadOS already pans a
+  // focused field in its wide/tablet layout; applying both adjustments creates
+  // a giant composer padding block and jumps the document upward.
+  try{return _isPhoneWidthViewport()&&matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
 function _syncKeyboardBottomInset(){
