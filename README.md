@@ -315,6 +315,15 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Full-height chat/composer on phones without bottom-nav spacing
 - Desktop layout completely unchanged
 
+### Local deployment: OS-owned virtual-keyboard geometry
+
+This fork is currently deployed from `experiment/no-virtual-keyboard-compensation`. It deliberately contains **no application-side virtual-keyboard
+GUI compensation** on iPhone, iPad, or any other form factor: no keyboard-inset
+measurement, `visualViewport` keyboard listeners, focus-zoom override, or
+keyboard-driven dropdown repositioning. The browser/OS owns keyboard and viewport
+drawing. This branch was activated after iPadOS composer focus exposed that layered
+workarounds can fight the OS and leave the app displaced into blank space.
+
 ---
 
 ## Configuration & access

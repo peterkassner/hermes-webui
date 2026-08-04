@@ -25,6 +25,17 @@ For architecture, testing, or setup work, also read the matching reference:
 For UI or UX work, read `docs/UIUX-GUIDE.md` and `DESIGN.md` before
 changing layout, interaction flow, themes, chat rendering, or composer chrome.
 
+## Active local deployment policy
+
+The local launchd-served fork is intentionally activated from
+`experiment/no-virtual-keyboard-compensation`, not `master`. It removes all application-side virtual-keyboard GUI accommodation:
+keyboard inset measurements, `visualViewport` keyboard listeners, iOS focus-zoom
+rules, and keyboard-driven popup repositioning. The browser/OS is authoritative
+for virtual-keyboard and viewport geometry on every form factor. This is a
+purposeful iPadOS regression experiment after layered compensation displaced the
+composer into blank space; do not reintroduce a workaround without physical iPad
+and iPhone verification and explicit operator approval.
+
 ## Onboarding and reinstall support
 
 If the task involves install, reinstall, bootstrap, first-run onboarding,
