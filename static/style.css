@@ -1495,12 +1495,6 @@
   :root{--app-titlebar-safe-top:0px;}
   .pwa-standalone{overscroll-behavior:none;}
   .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
-  /* iPadOS standalone shrinks 100dvh to the keyboard's visual viewport when a
-     textarea receives focus. This app shell is a flex column, so the shrink
-     collapses the whole shell into a strip at the top and leaves the rest of
-     the screen blank. Keep iOS on its stable layout viewport; narrow phones
-     use the separate visualViewport composer inset below. */
-  .pwa-ios body{height:100vh;}
   .app-titlebar-new-chat{display:none;}
   .pwa-standalone .app-titlebar-reload{display:inline-flex;}
   .pwa-offline .app-titlebar::after{content:'';position:absolute;left:50%;bottom:5px;width:5px;height:5px;border-radius:999px;background:var(--warning);box-shadow:0 0 0 3px color-mix(in srgb,var(--warning) 22%,transparent);transform:translateX(-50%);}

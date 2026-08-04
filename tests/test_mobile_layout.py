@@ -1008,11 +1008,13 @@ def test_100dvh_viewport_height():
         "style.css must use 100dvh for correct mobile viewport height (100vh hides content under address bar)"
 
 
-def test_ios_pwa_shell_uses_stable_layout_height_not_dvh():
-    """iPadOS must not collapse the whole flex shell on composer focus."""
+def test_ios_pwa_uses_dynamic_viewport_without_a_forced_height():
+    """iPadOS owns keyboard geometry; WebUI must not pin the PWA to 100vh."""
     css_ns = re.sub(r'\s+', '', CSS)
-    assert ".pwa-iosbody{height:100vh;}" in css_ns, \
-        "iOS PWA body must override the global 100dvh shell with stable 100vh"
+    assert ".pwa-iosbody{height:100vh;}" not in css_ns, \
+        "iOS PWA must not override Safari's dynamic viewport with a fixed 100vh height"
+    assert "body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;" in css_ns, \
+        "the app shell must retain its dynamic viewport height"
 
 
 def test_viewport_disables_page_zoom_for_native_pwa_shell():
