@@ -7356,6 +7356,33 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
 // is not defined" on every cache render, crashing the sidebar (#3696, regressed in
 // #3672 when _sidebarRowHasVisibleMessages was extracted to top level). Pure function
 // (only its arg `s` plus the i18n global `t`), so hoisting it is safe.
+async function copyHermesSessionId(event, sessionId){
+  event.preventDefault();
+  event.stopPropagation();
+  const id=String(sessionId||'').trim();
+  if(!id)return;
+  let copied=false;
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(id);
+      copied=true;
+    }
+  }catch(_){}
+  if(!copied){
+    const input=document.createElement('textarea');
+    input.value=id;
+    input.setAttribute('readonly','');
+    input.style.cssText='position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(input);
+    input.select();
+    try{copied=document.execCommand('copy');}catch(_){}
+    input.remove();
+  }
+  if(typeof showToast==='function'){
+    showToast(copied?`${t('status_session_id')} copied`:`Unable to copy ${t('status_session_id')}`,2600,copied?'':'error');
+  }
+}
+
 function _sessionAttentionState(s){
   const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
   if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
@@ -8032,6 +8059,16 @@ function renderSessionListFromCache(){
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    if(s.session_id===activeSidForSidebar){
+      const idChip=document.createElement('button');
+      idChip.type='button';
+      idChip.className='session-id-chip';
+      idChip.textContent=String(s.session_id);
+      idChip.title=`${t('status_session_id')}: ${s.session_id} — click to copy`;
+      idChip.setAttribute('aria-label',idChip.title);
+      idChip.onclick=(event)=>{copyHermesSessionId(event,s.session_id);};
+      titleRow.appendChild(idChip);
+    }
     // Project color dot: placed BETWEEN title and timestamp, not inside the
     // title span. Inside the title span it would be clipped by the ellipsis
     // truncation, becoming invisible exactly when the title is long enough

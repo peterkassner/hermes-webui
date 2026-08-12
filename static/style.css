@@ -7255,3 +7255,16 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+/* Active-conversation identifier: quiet, directly copyable operational metadata. */
+.session-id-chip{
+  flex:0 1 auto;min-width:0;max-width:11.5em;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  padding:1px 5px;border:1px solid var(--border2);border-radius:var(--radius-sm,4px);
+  background:transparent;color:var(--muted);font:500 10px/1.4 var(--font-mono,ui-monospace,monospace);
+  cursor:copy;
+}
+.session-id-chip:hover,.session-id-chip:focus-visible{
+  border-color:var(--accent);color:var(--text);background:var(--accent-bg);
+}
+.session-id-chip:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px;}
