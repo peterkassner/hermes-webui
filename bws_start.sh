@@ -129,6 +129,13 @@ fi
 # bootstrap.py normally loads repo .env and overwrites existing values. Preserve
 # the BWS-resolved password so stale local .env cannot cause invalid logins.
 export HERMES_WEBUI_PRESERVE_ENV=1
+export HERMES_WEBUI_AGENT_DIR="${HERMES_WEBUI_AGENT_DIR:-$HOME/.hermes/hermes-agent}"
+export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HOME/.hermes/webui}"
+export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
+export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
+export HERMES_WEBUI_TLS_INSECURE_PROBE="${HERMES_WEBUI_TLS_INSECURE_PROBE:-1}"
+# The GUI restart control is opt-in and uses launchd, the sole process owner.
+export HERMES_WEBUI_RESTART_COMMAND="${HERMES_WEBUI_RESTART_COMMAND:-/bin/launchctl kickstart -k gui/$(id -u)/com.peterkjackson.hermes-webui}"
 
 if [[ "${HERMES_WEBUI_DRY_RUN:-}" == "1" ]]; then
   if [[ "$HERMES_WEBUI_PASSWORD" != "$HERMES_WEBUI_PW" ]]; then
@@ -139,13 +146,13 @@ if [[ "${HERMES_WEBUI_DRY_RUN:-}" == "1" ]]; then
   exit 0
 fi
 
-export HERMES_WEBUI_AGENT_DIR="${HERMES_WEBUI_AGENT_DIR:-$HOME/.hermes/hermes-agent}"
-export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HOME/.hermes/webui}"
-export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
-export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
-export HERMES_WEBUI_TLS_INSECURE_PROBE="${HERMES_WEBUI_TLS_INSECURE_PROBE:-1}"
-# The GUI restart control is opt-in and uses launchd, the sole process owner.
-export HERMES_WEBUI_RESTART_COMMAND="${HERMES_WEBUI_RESTART_COMMAND:-/bin/launchctl kickstart -k gui/$(id -u)/com.peterkjackson.hermes-webui}"
+# Launchd does not source zsh. Keep the picker aligned with the user's explicit
+# path exports without loading their interactive shell or replacing manual choices.
+if workspace_sync_output="$(python3 scripts/sync_zsh_workspaces.py 2>> "$ERR_FILE")"; then
+  log "$workspace_sync_output"
+else
+  err "zsh workspace sync failed; continuing with the existing workspace list."
+fi
 
 log "Starting Tailscale Funnel -> https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}"
 if ! tailscale funnel --bg --yes "https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}" >> "$LOG_FILE" 2>> "$ERR_FILE"; then
