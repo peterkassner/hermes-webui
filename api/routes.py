@@ -11837,6 +11837,26 @@ def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) 
     return text
 
 
+def _disarm_supervised_run_marker() -> tuple[bool, bool]:
+    """Remove the opt-in supervisor marker before an intentional GUI stop.
+
+    Returns ``(ok, configured)``.  When no marker is configured the historical
+    standalone shutdown behavior is unchanged.  When a supervisor marker is
+    configured, failure to remove it must abort shutdown; otherwise an
+    always-on supervisor would immediately restart a server the user explicitly
+    asked to stop.
+    """
+    raw_marker = (os.getenv("HERMES_WEBUI_RUN_MARKER") or "").strip()
+    if not raw_marker:
+        return True, False
+    try:
+        Path(raw_marker).expanduser().unlink(missing_ok=True)
+    except OSError as exc:
+        logger.error("Could not disarm supervised WebUI restart before shutdown: %s", exc)
+        return False, True
+    return True, True
+
+
 def _handle_shutdown(handler) -> bool:
     """Shut down the WebUI server process."""
     headers = getattr(handler, "headers", {})
@@ -11851,7 +11871,17 @@ def _handle_shutdown(handler) -> bool:
         _shutdown_log_value(getattr(handler, "path", None), max_len=240),
         _shutdown_log_value(ua, default="no-ua", max_len=240),
     )
-    j(handler, {"status": "shutting_down"})
+    marker_ok, marker_configured = _disarm_supervised_run_marker()
+    if not marker_ok:
+        return j(
+            handler,
+            {"error": "Could not stop the supervised WebUI safely"},
+            status=500,
+        )
+    payload = {"status": "shutting_down"}
+    if marker_configured:
+        payload["intentional_stop"] = True
+    j(handler, payload)
     import signal
     import threading
 
