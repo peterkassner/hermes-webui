@@ -4575,6 +4575,26 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
   };
 }
 
+function _appendSessionCopyIdAction(menu, session){
+  menu.appendChild(_buildSessionAction(
+    `${t('copy')} ${t('status_session_id')}`,
+    `${t('copy')} ${t('status_session_id')}`,
+    ICONS.copy,
+    async()=>{
+      closeSessionActionMenu();
+      const sid=String((session&&session.session_id)||'').trim();
+      if(!sid) return;
+      try{
+        const copied=await _copyTextToClipboard(sid);
+        if(copied) showToast(`${t('status_session_id')} ${t('copied')}`);
+        else showToast(`${t('copy_failed')}: ${t('status_session_id')}`,3000,'error');
+      }catch(err){
+        showToast(`${t('copy_failed')}: ${t('status_session_id')}`,3000,'error');
+      }
+    }
+  ));
+}
+
 function _appendSessionCopyLinkAction(menu, session){
   menu.appendChild(_buildSessionAction(
     t('session_copy_link'),
@@ -4804,6 +4824,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
   _appendSessionCopyLinkAction(menu, session);
+  _appendSessionCopyIdAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);
