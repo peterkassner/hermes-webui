@@ -165,6 +165,21 @@ const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
+// Detect coexisting fine pointer (trackpad/mouse) on touch-primary devices
+// so we can avoid virtual-keyboard compensation when a hardware keyboard is attached.
+(function(){
+  try{
+    var hasFine = window.matchMedia('(any-pointer:fine)').matches;
+    document.documentElement.classList.toggle('has-fine-pointer', hasFine);
+    if(window.matchMedia){
+      var mq = window.matchMedia('(any-pointer:fine)');
+      var handler = function(e){ document.documentElement.classList.toggle('has-fine-pointer', e.matches); };
+      if(mq.addEventListener) mq.addEventListener('change', handler);
+      else if(mq.addListener) mq.addListener(handler);
+    }
+  }catch(_){}
+})();
+
 let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _pendingSelections=[];  // [{id, name, text}] — named context blocks
