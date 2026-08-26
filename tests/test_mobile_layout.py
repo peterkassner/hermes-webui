@@ -1059,8 +1059,8 @@ def test_safe_area_variables_available_for_pwa_shell():
     assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS, (
         "CSS must expose env(safe-area-inset-top) through --app-titlebar-safe-top"
     )
-    assert "padding:8px 10px 12px!important" in CSS, (
-        "Phone composer must use static padding; the OS owns virtual-keyboard geometry"
+    assert "padding:8px 10px max(12px,env(safe-area-inset-bottom,0))!important" in CSS, (
+        "Phone composer must use static padding with safe-area bottom; the OS owns virtual-keyboard geometry"
     )
 
 
