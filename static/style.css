@@ -1518,9 +1518,10 @@
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
       .app-titlebar-reload{display:inline-flex;}
+      /* Give composer room for home indicator without fighting keyboard */
+      .composer-wrap{padding-bottom:max(12px,env(safe-area-inset-bottom,0));}
     }
-  }
-  html{background:var(--sidebar);}
+    html{background:var(--sidebar);}
   .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important;}
   body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;}
   .layout{display:flex;width:100%;flex:1 1 auto;min-height:0;}
@@ -2567,7 +2568,7 @@
   .suggestion{padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
   .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
   /* ── Composer ── */
-  .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
+  .composer-wrap{padding:12px 20px max(16px,env(safe-area-inset-bottom,0));background:var(--bg);flex-shrink:0;}
   .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
   .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .composer-wrap.drag-over .composer-box{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
@@ -3104,7 +3105,7 @@
     .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
-    .composer-wrap{padding:8px 10px 12px!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}
+    .composer-wrap{padding:8px 10px max(12px,env(safe-area-inset-bottom,0))!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
@@ -3202,6 +3203,8 @@
     .session-item{padding-right:6px;}
     .session-item.streaming,.session-item.unread{padding-right:40px;}
     .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
+    /* Give composer room for home indicator on touch devices */
+    .composer-wrap{padding-bottom:max(12px,env(safe-area-inset-bottom,0))!important;}
   }
 
   @media (max-width: 340px){

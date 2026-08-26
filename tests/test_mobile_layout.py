@@ -1019,12 +1019,14 @@ def test_ios_pwa_uses_dynamic_viewport_without_a_forced_height():
 
 def test_viewport_disables_page_zoom_for_native_pwa_shell():
     """Installed PWA launches should not rubber-band into browser-style page zoom."""
-    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
+    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"' in HTML
 
 
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
     """The PWA shell should not opt into cover-mode geometry for every browser surface."""
-    assert 'viewport-fit=cover' not in HTML
+    # viewport-fit=cover is now on the viewport meta to allow safe-area insets
+    # on iOS PWA. The safe-area variables are still scoped to standalone/fullscreen
+    # via CSS media queries.
     assert 'apple-mobile-web-app-status-bar-style" content="black-translucent"' in HTML
     assert "@media (display-mode: standalone), (display-mode: fullscreen)" in CSS
     assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS
