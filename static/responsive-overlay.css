@@ -1,0 +1,88 @@
+/*
+ * Responsive sizing overlay
+ *
+ * This file loads after style.css, so local page styles can override the
+ * variables below without editing the stock stylesheet. Edit the matching
+ * viewport section to tune phone, tablet, and desktop clients independently.
+ *
+ * Width alone cannot tell an iPad from a narrow desktop window. Phone and
+ * tablet rules therefore require a coarse primary pointer; narrow desktop
+ * browsers keep the desktop values. A desktop browser with touch as its
+ * primary input is intentionally treated as touch hardware.
+ */
+
+:root {
+  --viewport-ui-font-size: 14px;
+  --viewport-message-font-size: var(--message-body-font-size);
+  --viewport-control-size: 34px;
+  --viewport-control-icon-size: 16px;
+  --viewport-control-radius: 8px;
+  --viewport-control-gap: 8px;
+  --viewport-page-padding: 16px;
+}
+
+/* Desktop: default values, including narrow macOS and Windows windows. */
+@media (hover: hover) and (pointer: fine) {
+  :root {
+    --viewport-ui-font-size: 14px;
+    --viewport-message-font-size: var(--message-body-font-size);
+    --viewport-control-size: 34px;
+    --viewport-control-icon-size: 16px;
+    --viewport-control-radius: 8px;
+    --viewport-control-gap: 8px;
+    --viewport-page-padding: 16px;
+  }
+}
+
+/* iPhone-class touch viewports: 0px through 600px wide. */
+@media (max-width: 600px) and (pointer: coarse) {
+  :root {
+    --viewport-ui-font-size: 15px;
+    --viewport-message-font-size: 15px;
+    --viewport-control-size: 44px;
+    --viewport-control-icon-size: 18px;
+    --viewport-control-radius: 10px;
+    --viewport-control-gap: 10px;
+    --viewport-page-padding: 12px;
+  }
+}
+
+/* iPad-class touch viewports: 601px through 1180px wide. */
+@media (min-width: 601px) and (max-width: 1180px) and (pointer: coarse) {
+  :root {
+    --viewport-ui-font-size: 15px;
+    --viewport-message-font-size: 15px;
+    --viewport-control-size: 40px;
+    --viewport-control-icon-size: 17px;
+    --viewport-control-radius: 9px;
+    --viewport-control-gap: 9px;
+    --viewport-page-padding: 14px;
+  }
+}
+
+/*
+ * Shared application of the editable sizing tokens.
+ *
+ * The media queries above only choose values; custom properties do not alter
+ * the UI until a rule consumes them. Keep those consuming rules here so all
+ * device profiles use the same component bindings. To change a profile, edit
+ * its token values above; add a binding here only when a new UI surface should
+ * respond consistently across phone, tablet, and desktop.
+ */
+body { font-size: var(--viewport-ui-font-size); }
+.msg-body { font-size: var(--viewport-message-font-size); }
+.icon-btn,
+.mic-btn,
+.voice-mode-btn,
+.send-btn {
+  width: var(--viewport-control-size);
+  height: var(--viewport-control-size);
+  min-width: var(--viewport-control-size);
+  min-height: var(--viewport-control-size);
+  border-radius: var(--viewport-control-radius);
+}
+.icon-btn,
+.mic-btn,
+.voice-mode-btn { font-size: var(--viewport-control-icon-size); }
+.composer-footer { gap: var(--viewport-control-gap); }
+.messages-inner { padding-left: var(--viewport-page-padding); padding-right: var(--viewport-page-padding); }
