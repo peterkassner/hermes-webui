@@ -11919,7 +11919,7 @@ def _handle_health_restart(handler) -> bool:
 
 
 def _serve_manifest(handler) -> bool:
-    """Serve static/manifest.json with the correct PWA Content-Type.
+    """Serve static/manifest.json as application/manifest+json with Cache-Control: no-store.
 
     Shared by the root (/manifest.json, /manifest.webmanifest) and
     session-prefixed (/session/manifest.json, /session/manifest.webmanifest)
@@ -11929,7 +11929,16 @@ def _serve_manifest(handler) -> bool:
     static_root = api_config.get_static_root()
     manifest_path = (static_root / "manifest.json").resolve()
     if manifest_path.exists():
-        data = manifest_path.read_bytes()
+        # PWA icons must use the same deploy fingerprint as their HTML links;
+        # otherwise a manifest refresh can still reuse a stale icon URL.
+        from urllib.parse import quote
+        from api.updates import WEBUI_VERSION
+        version_token = quote(WEBUI_VERSION, safe="")
+        data = (
+            manifest_path.read_text(encoding="utf-8")
+            .replace("__WEBUI_VERSION__", version_token)
+            .encode("utf-8")
+        )
         handler.send_response(200)
         handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
         handler.send_header("Cache-Control", "no-store")

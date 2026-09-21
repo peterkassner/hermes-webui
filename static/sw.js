@@ -40,9 +40,13 @@ const SHELL_ASSETS = [
   './static/vendor/smd.min.js' + VQ,
   './static/vendor/katex/0.16.22/katex.min.css' + VQ,
   './static/vendor/katex/0.16.22/katex.min.js' + VQ,
-  './static/favicon.svg',
-  './static/favicon-32.png',
-  './manifest.json',
+  './static/favicon.svg' + VQ,
+  './static/favicon-32.png' + VQ,
+  './static/favicon.ico' + VQ,
+  './static/favicon-192.png' + VQ,
+  './static/favicon-512.png' + VQ,
+  './static/apple-touch-icon.png' + VQ,
+  './manifest.json' + VQ,
 ];
 
 function deleteOldShellCaches() {
