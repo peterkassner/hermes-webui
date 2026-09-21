@@ -11,6 +11,7 @@ Covers:
 import json
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,7 +48,9 @@ class TestManifest:
                 continue  # external icon, skip
             # Paths are relative to the app root (where manifest is served)
             # 'static/favicon.svg' or './static/favicon.svg' both valid
-            clean = src.lstrip("./")
+            # Deployed manifest entries are cache-busted with a query string;
+            # validate the underlying static path, not the URL fingerprint.
+            clean = urlsplit(src).path.lstrip("./")
             p = ROOT / clean
             assert p.exists(), f"manifest.json references missing icon: {src}"
 
@@ -214,6 +217,20 @@ class TestIndexHtmlIntegration:
         src = INDEX.read_text(encoding="utf-8")
         assert "sw.js?v=__WEBUI_VERSION__" in src
         assert "static/ui.js?v=__WEBUI_VERSION__" in src
+
+    def test_index_versions_all_icon_and_manifest_urls(self):
+        """A deployed icon must get a fresh URL, not a stale browser cache entry."""
+        src = INDEX.read_text(encoding="utf-8")
+        for asset in (
+            "static/favicon.svg",
+            "static/favicon-32.png",
+            "static/favicon.ico",
+            "static/apple-touch-icon.png",
+            "manifest.json",
+        ):
+            assert f'{asset}?v=__WEBUI_VERSION__' in src, (
+                f"{asset} must carry the deploy version so browsers refresh branding immediately"
+            )
 
     def test_index_versions_stylesheet(self):
         """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST
