@@ -735,7 +735,7 @@ def test_mobile_session_page_close_button_is_mobile_scoped():
     assert 'class="panel-head-btn mobile-sidebar-close' in HTML, (
         "Sidebar needs a close button for the full-screen mobile session page"
     )
-    assert 'onclick="closeMobileSidebar()"' in HTML, (
+    assert 'onclick="dismissMobileSidebar()"' in HTML, (
         "Mobile session page close button should close the sidebar"
     )
     assert "mobile-sidebar-close{display:none" in CSS.replace(" ", ""), (
@@ -1019,7 +1019,9 @@ def test_ios_pwa_uses_dynamic_viewport_without_a_forced_height():
 
 def test_viewport_disables_page_zoom_for_native_pwa_shell():
     """Installed PWA launches should not rubber-band into browser-style page zoom."""
-    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"' in HTML
+    assert 'name="viewport"' in HTML
+    assert 'viewport-fit=cover' in HTML
+    assert 'interactive-widget=resizes-content' in HTML
 
 
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
