@@ -432,6 +432,11 @@ async function switchPanel(name, opts = {}) {
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
+  if (prevPanel === 'tasks' && nextPanel !== 'tasks') {
+    _cronLoadGeneration++;
+    _stopCronWatch();
+  }
+  if (prevPanel === 'kanban' && nextPanel !== 'kanban') _kanbanInventoryGeneration++;
   _currentPanel = nextPanel;
   // Mobile drawer visibility: a rail/tab click on a phone should surface the
   // panel synchronously, NOT after the panel's async data load. If the re-open
@@ -1286,6 +1291,7 @@ let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a
 let _cronDetailRefreshKey = null;  // explicit refresh intent survives a superseding poll
 
 async function loadCrons(animate, options) {
+  if (_currentPanel !== 'tasks') return;
   const background = !!(options && options.background);
   const hasDetailRefreshKey = !!(options && Object.prototype.hasOwnProperty.call(options, 'detailRefreshKey'));
   const requestedDetailRefreshKey = hasDetailRefreshKey ? options.detailRefreshKey : null;
@@ -1300,6 +1306,7 @@ async function loadCrons(animate, options) {
   // at entry and bail once a superseded request realises it is no longer the
   // latest, so only the newest render wins.
   const _cronLoadSeq = ++_cronLoadGeneration;
+  const _cronLoadProfile = S.activeProfile || 'default';
   let _resolveCronLoadSettled;
   const _cronLoadSettled = new Promise(resolve => { _resolveCronLoadSettled = resolve; });
   _cronLatestLoadSettled = _cronLoadSettled;
@@ -1315,9 +1322,11 @@ async function loadCrons(animate, options) {
   }
   try {
     await loadCronProfiles();
+    if (_currentPanel !== 'tasks' || _cronLoadProfile !== (S.activeProfile || 'default')) return;
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
-    if (_cronLoadSeq !== _cronLoadGeneration) return data;  // callers still need their fetched jobs
+    if (_cronLoadSeq !== _cronLoadGeneration || _currentPanel !== 'tasks'
+        || _cronLoadProfile !== (S.activeProfile || 'default')) return data;  // callers still need their fetched jobs
     _cronAcceptedLoadGeneration = _cronLoadSeq;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
@@ -1674,9 +1683,12 @@ function _setCronHeaderButtons(mode, job) {
 }
 
 async function _loadCronDetailRuns(jobId, detailKey){
+  if (_currentPanel !== 'tasks') return;
+  const detailProfile = S.activeProfile || 'default';
   try {
     const data = await api(`/api/crons/history?job_id=${encodeURIComponent(jobId)}&limit=50`);
-    if (!_cronDetailMatches(jobId, detailKey)) return;
+    if (_currentPanel !== 'tasks' || detailProfile !== (S.activeProfile || 'default')
+        || !_cronDetailMatches(jobId, detailKey)) return;
     const card = $('cronDetailRuns');
     if (!card) return;
     const outputTitle = _cronOutputTitle(_currentCronDetail);
@@ -2497,10 +2509,13 @@ let _cronWatchTimerInterval = null;
 
 function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
+  if (_currentPanel !== 'tasks') return;
+  const watchProfile = S.activeProfile || 'default';
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
     try {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
+      if (_currentPanel !== 'tasks' || watchProfile !== (S.activeProfile || 'default')) return;
       if (!data.running) {
         _stopCronWatch();
         if (_cronDetailMatches(jobId, detailKey)) {
@@ -3175,7 +3190,21 @@ function _kanbanUnavailableHtml(err){
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
 }
 
+let _kanbanInventoryGeneration = 0;
+function _kanbanInventoryScope(){
+  const profile = S.activeProfile || 'default';
+  const generation = _kanbanInventoryGeneration;
+  return () => _currentPanel === 'kanban'
+    && profile === (S.activeProfile || 'default')
+    && generation === _kanbanInventoryGeneration;
+}
 async function loadKanban(animate){
+  if (_currentPanel !== 'kanban') return;
+  const inventoryProfile = S.activeProfile || 'default';
+  const inventoryGeneration = ++_kanbanInventoryGeneration;
+  const inventoryCurrent = () => _currentPanel === 'kanban'
+    && inventoryProfile === (S.activeProfile || 'default')
+    && inventoryGeneration === _kanbanInventoryGeneration;
   const board = $('kanbanBoard');
   const list = $('kanbanList');
   try {
@@ -3184,9 +3213,12 @@ async function loadKanban(animate){
     // tab archived the previous board, /boards can fall back to default instead
     // of leaving config/board pinned to a ghost slug.
     await loadKanbanBoards();
+    if (!inventoryCurrent()) return;
     const config = await api('/api/kanban/config' + _kanbanBoardQuery());
+    if (!inventoryCurrent()) return;
     let assignees = null;
     try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
+    if (!inventoryCurrent()) return;
     _kanbanApplyConfigDefaults(config);
     const filters = _kanbanCurrentFilters();
     const params = new URLSearchParams();
@@ -3197,6 +3229,7 @@ async function loadKanban(animate){
     if (_kanbanCurrentBoard) params.set('board', _kanbanCurrentBoard);
     const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
     const data = await api(path);
+    if (!inventoryCurrent()) return;
     if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
     _kanbanBoard = data || {columns: []};
     if ((!_kanbanBoard.columns || !_kanbanBoard.columns.length) && config && config.columns) {
@@ -3213,6 +3246,7 @@ async function loadKanban(animate){
     _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
     _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
     await loadKanbanStats();
+    if (!inventoryCurrent()) return;
     // Note: PR #1828 (v0.51.20) moved the boards refresh to the start of
     // loadKanban() so the active board is resolved BEFORE board-scoped
     // requests fire. The previous tail-of-function refresh has been removed
@@ -3223,6 +3257,7 @@ async function loadKanban(animate){
     _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
+    if (!inventoryCurrent()) return;
     const html = _kanbanUnavailableHtml(e);
     if (board) board.innerHTML = html;
     if (list) list.innerHTML = html;
@@ -3232,8 +3267,11 @@ async function loadKanban(animate){
 function filterKanban(){ _kanbanRenderBoard(); }
 
 async function loadKanbanStats(){
+  if (_currentPanel !== 'kanban') return;
+  const inventoryCurrent = _kanbanInventoryScope();
   try {
     const stats = await api('/api/kanban/stats' + _kanbanBoardQuery());
+    if (!inventoryCurrent()) return;
     const el = $('kanbanStats');
     if (!el) return;
     const byStatus = (stats && stats.by_status) || {};
@@ -3259,6 +3297,7 @@ async function refreshKanbanEvents(){
 }
 
 function _kanbanStartPolling(){
+  if (_currentPanel !== 'kanban') return;
   // Prefer SSE for low-latency live updates. Fall back to polling on
   // browsers without EventSource or after repeated stream failures.
   if (typeof EventSource === 'undefined' || _kanbanEventSourceFailures >= 3) {
@@ -3275,6 +3314,7 @@ function _kanbanStopPolling(){
 }
 
 function _kanbanStartEventStream(){
+  if (_currentPanel !== 'kanban') return;
   // Tear down any prior stream before opening a new one (board switch,
   // login change, etc.).
   if (_kanbanEventSource) { try { if(_kanbanEventSource.readyState!==2)_kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
@@ -3306,6 +3346,7 @@ function _kanbanStartEventStream(){
     _scheduleKanbanRefresh(data.events);
   });
   es.onerror = () => {
+    if (_currentPanel !== 'kanban' || es !== _kanbanEventSource) return;
     _kanbanEventSourceFailures += 1;
     if (_kanbanEventSourceFailures >= 3) {
       // Give up on SSE for this session — fall back to HTTP polling.
@@ -4378,6 +4419,8 @@ function _kanbanSetSavedBoard(slug){
 }
 
 async function loadKanbanBoards(){
+  if (_currentPanel !== 'kanban') return;
+  const inventoryCurrent = _kanbanInventoryScope();
   // Fetches the boards list and updates the switcher UI. Best-effort —
   // failures hide the switcher rather than blocking the panel from rendering.
   const switcher = document.getElementById('kanbanBoardSwitcher');
@@ -4387,9 +4430,10 @@ async function loadKanbanBoards(){
     data = await api('/api/kanban/boards');
   } catch(e) {
     // Hide switcher on error so the user isn't stuck with a half-broken UI.
-    switcher.hidden = true;
+    if (inventoryCurrent()) switcher.hidden = true;
     return;
   }
+  if (!inventoryCurrent()) return;
   const boards = (data && data.boards) || [];
   const serverCurrent = (data && data.current) || 'default';
   _kanbanBoardsList = boards;
@@ -14129,7 +14173,7 @@ function _resetCronUnreadForProfileSwitch(){
 // Auto-refresh the cron list when a job is created from chat or any external source.
 // The chat path dispatches this event when the agent response mentions cron creation.
 window.addEventListener('hermes:cron_created', () => {
-  if ($('cronList')) loadCrons();
+  if (_currentPanel === 'tasks' && $('cronList')) loadCrons();
 });
 
 function startCronPolling(){

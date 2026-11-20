@@ -9,7 +9,7 @@ load issues several of these lookups.
 ``lookup_cli_session_row()`` answers from the producer's own cache entry, and
 only while the producer itself would serve that entry. That makes its answer
 equal to the enumeration's **by definition** rather than by argument, and it
-returns ``{}`` otherwise so the caller enumerates.
+returns ``{}`` otherwise so the caller reads the exact requested ID.
 
 These tests pin both halves: it answers without re-projecting, and it never
 answers from an entry the producer would have rebuilt.
@@ -174,7 +174,7 @@ def test_lookup_keeps_the_enumerators_exact_id_comparison(stubbed_catalog):
 # ── It never answers from an entry the producer would rebuild ─────────────
 
 
-def test_expired_snapshot_defers_to_the_enumeration(stubbed_catalog, monkeypatch):
+def test_expired_snapshot_defers_without_enumeration(stubbed_catalog, monkeypatch):
     """Expiry is the producer's rebuild trigger, so the lookup must defer.
 
     A rebuild can disagree with the snapshot through inputs the key never sees
@@ -191,7 +191,7 @@ def test_expired_snapshot_defers_to_the_enumeration(stubbed_catalog, monkeypatch
     _block_fallback_reads(monkeypatch)
     enumerations = _count_enumerations(monkeypatch)
     assert routes._lookup_cli_session_metadata(target) == {}
-    assert enumerations == [1], "an expired snapshot must defer to enumeration"
+    assert enumerations == [], "expiry must never trigger global enumeration"
 
 
 def test_cold_cache_defers(stubbed_catalog, monkeypatch):
@@ -200,8 +200,9 @@ def test_cold_cache_defers(stubbed_catalog, monkeypatch):
     models.clear_cli_sessions_cache()
     _block_fallback_reads(monkeypatch)
     enumerations = _count_enumerations(monkeypatch, [dict(ROWS[0])])
+    monkeypatch.setattr(routes, "get_cli_session_by_id", lambda sid, **kw: dict(ROWS[0]))
     assert routes._lookup_cli_session_metadata(target)["session_id"] == target
-    assert enumerations == [1]
+    assert enumerations == []
 
 
 def test_disabled_cache_defers(stubbed_catalog, monkeypatch):
@@ -233,12 +234,15 @@ def test_lookup_does_not_answer_across_profiles(stubbed_catalog, monkeypatch):
     assert models.lookup_cli_session_row(target) == {}
 
 
-def test_metadata_lookup_honours_a_replaced_enumeration(stubbed_catalog, monkeypatch):
-    """A caller that replaces ``get_cli_sessions()`` still drives the lookup."""
+def test_metadata_lookup_uses_exact_reader_instead_of_replaced_enumeration(stubbed_catalog, monkeypatch):
+    """Intentional contract change: plugins must replace the exact-ID reader."""
     rows = [{"session_id": "replaced-enumeration-1", "profile": "default"}]
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_load_cli_sessions_uncached", lambda *a, **kw: [])
     monkeypatch.setattr(routes, "get_cli_sessions", lambda **kw: [dict(r) for r in rows])
 
+    _block_fallback_reads(monkeypatch)
+    assert routes._lookup_cli_session_metadata("replaced-enumeration-1") == {}
+    monkeypatch.setattr(routes, "get_cli_session_by_id", lambda sid, **kw: next((dict(r) for r in rows if r['session_id'] == sid), {}))
     assert routes._lookup_cli_session_metadata("replaced-enumeration-1") == rows[0]
     assert routes._lookup_cli_session_metadata("not-in-the-enumeration") == {}

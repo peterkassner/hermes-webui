@@ -1,5 +1,49 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Shared warm session inventory
+
+Use a fresh disposable root and the repository runner:
+
+```sh
+trial_root=$(mktemp -d "${TMPDIR:-/tmp}/webui-inventory-tests.XXXXXX")
+export HERMES_HOME="$trial_root/home"
+export HERMES_BASE_HOME="$trial_root/base"
+export HERMES_CONFIG_PATH="$trial_root/home/config.yaml"
+export HERMES_WEBUI_STATE_DIR="$trial_root/webui"
+export HERMES_WEBUI_TEST_STATE_DIR="$trial_root/tests"
+mkdir -p "$HERMES_HOME" "$HERMES_BASE_HOME" "$HERMES_WEBUI_STATE_DIR"
+./scripts/test.sh -q tests/test_warm_session_inventory.py tests/test_warm_inventory_client.py tests/test_session_sidebar_cache.py tests/test_issue4842_cli_cache_streaming.py tests/test_cli_sessions_cache_fingerprint.py tests/test_session_list_cache_bounded.py tests/test_streaming_cache_ttl_vs_poll.py tests/test_cli_session_metadata_fastpath.py tests/test_cli_session_metadata_fastpath_integration.py tests/test_gateway_watcher_idle_park.py tests/test_gateway_watcher_profile.py tests/test_gateway_watcher_resubscribe_fresh.py tests/test_issue5501_session_list_retry_affordance.py tests/test_issue3019_cron_project_sessions.py tests/test_webhook_project_sessions.py tests/test_project_assigned_cli_session_limit.py tests/test_pr7555_cli_session_availability.py
+```
+
+`tests/browser_warm_session_inventory.py` starts its own localhost server with
+synthetic SQLite/sidecar histories, isolated configuration and a synthetic login.
+It uses four independent authenticated Chromium contexts, including narrow widths,
+and blocks browser requests to external origins. Server outbound network access is
+blocked too. No provider calls or live state are needed. It records 20 reads per
+endpoint, screenshots, request paths, real reader/build counts and an unchanged
+11-second no-browser interval. An external edit is made with all browsers closed,
+then checked on reconnect. The probe always terminates its own server.
+
+```sh
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --output /tmp/webui-inventory-after
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --revision CHECKPOINT_COMMIT --output /tmp/webui-inventory-before
+```
+
+The temporary Playwright package is verification tooling, not an application
+dependency. An installed Chromium is required; set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` when necessary. The probe uses the current
+repository `.venv` for both server revisions. Its metrics endpoint exists only in
+the disposable launcher, never in the application server.
+
+Check that ordinary boot and warm reads perform zero background history passes,
+filtered sidebar reads add no inventory builds, each selected background project
+loads its own history, and unchanged idle scopes cause no expensive rebuilds.
+A successful empty store, failed read and slow-owner deadline are distinct tests.
+Compare cold/preparation behavior separately from already-warm timings; mocks and
+small synthetic histories do not reproduce a large production database or prove
+public-ingress/iPad performance. Do not restart production or flush live caches to
+manufacture cold results.
+
 ## User-bounded legacy tool anchors (#8427)
 
 Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.

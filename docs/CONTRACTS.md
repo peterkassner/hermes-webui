@@ -23,6 +23,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/architecture/warm-session-inventory.md`](architecture/warm-session-inventory.md):
+  implemented local contract for shared metadata, no-client reconciliation,
+  exact-ID resolution, retryable cold failures and on-demand background histories.
+  Start here before changing session-list cache ownership or inventory loading.
+
 - [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
   current contract for provider-scoped model identity, exact OpenRouter route
   matching, overflow promotion, routed fallback, and selected-row rendering.

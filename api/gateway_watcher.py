@@ -217,6 +217,8 @@ class GatewayWatcher:
         profile_name: str | None = None,
         state_db_path: Path | None = None,
     ):
+        self.warm_inventory = False
+        self._warm_initialized = False
         self._subscribers: list[queue.Queue] = []
         self._sub_lock = threading.Lock()
         # Final removal invalidates any projection admitted by an earlier cohort.
@@ -264,6 +266,9 @@ class GatewayWatcher:
     def stop(self):
         """Stop the watcher thread."""
         self._stop_event.set()
+        if self.warm_inventory:
+            from api.route_session_list_cache import stop_warm_scopes
+            stop_warm_scopes()
         self._idle_wake.set()  # unpark if waiting for the first subscriber
         # Wake up any subscribers
         with self._sub_lock:
@@ -360,6 +365,24 @@ class GatewayWatcher:
         if not has_subscribers:
             # Final removal already invalidated the cache under the same lock.
             return False
+        from api.route_session_list_cache import warm_gateway_snapshot
+        warm_rows = warm_gateway_snapshot(self.profile_name or "default", self._hermes_home)
+        if warm_rows is not None:
+            if isinstance(warm_rows, tuple):
+                return False  # The shared builder is still working.
+            sessions = [dict(row, source=row.get('raw_source') or row.get('source_tag') or 'cli')
+                        for row in warm_rows
+                        if (row.get('raw_source') or row.get('source_tag')) not in ("webui", "cron", "webhook", "kanban")]
+            current_hash = _snapshot_hash(sessions)
+            with self._sub_lock:
+                if admission_epoch != self._subscriber_epoch or not self._subscribers:
+                    return False
+                changed = current_hash != self._last_hash
+                if changed:
+                    self._last_hash, self._last_sessions = current_hash, sessions
+            if changed:
+                self._notify_subscribers(sessions, epoch=admission_epoch)
+            return changed
         db_path = self._state_db_path
         # A watcher may start before the agent has created state.db. Publishing an
         # empty first snapshot would make an already-rendered sidebar disappear;
@@ -414,7 +437,19 @@ class GatewayWatcher:
         10 wakeups/sec ``time.sleep(0.1)`` spin.
         """
         while not self._stop_event.is_set():
-            if not self._has_subscribers():
+            if self.warm_inventory:
+                try:
+                    from api.routes import _reconcile_warm_session_inventories
+                    from api.profiles import set_request_profile, clear_request_profile
+                    set_request_profile(self.profile_name or "default")
+                    try:
+                        _reconcile_warm_session_inventories(startup=not self._warm_initialized)
+                        self._warm_initialized = True
+                    finally:
+                        clear_request_profile()
+                except Exception:
+                    logger.debug("Warm session reconciliation failed", exc_info=True)
+            if not self._has_subscribers() and not self.warm_inventory:
                 self._idle_wake.clear()
                 # subscribe() may have raced between the check and clear; if so
                 # the flag is already set again and we must not park.
@@ -481,14 +516,14 @@ def _watcher_has_subscribers(watcher: GatewayWatcher) -> bool:
 def _pop_idle_watchers_locked(*, exclude_key: str) -> list[GatewayWatcher]:
     stale: list[GatewayWatcher] = []
     for key, watcher in list(_watchers.items()):
-        if key == exclude_key or _watcher_has_subscribers(watcher):
+        if key == exclude_key or getattr(watcher, "warm_inventory", False) or _watcher_has_subscribers(watcher):
             continue
         if _watchers.get(key) is watcher:
             stale.append(_watchers.pop(key))
     return stale
 
 
-def start_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None):
+def start_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None, warm_inventory=False):
     """Start the watcher for the resolved profile home (idempotent)."""
     resolved_profile, resolved_home = _resolve_watcher_target(
         profile_name=profile_name,
@@ -501,8 +536,12 @@ def start_watcher(*, profile_name: str | None = None, hermes_home: Path | None =
             if watcher is not None:
                 watcher.stop()
             watcher = GatewayWatcher(profile_name=resolved_profile, hermes_home=resolved_home)
+            watcher.warm_inventory = warm_inventory
             watcher.start()
             _watchers[key] = watcher
+        elif warm_inventory:
+            watcher.warm_inventory = True
+            watcher._idle_wake.set()
         return watcher
 
 
@@ -535,6 +574,10 @@ def restart_watcher_for_profile(name: str):
     with _watcher_lock:
         existing = _watchers.pop(key, None)
         stale_watchers = [] if existing is not None else _pop_idle_watchers_locked(exclude_key=key)
+        if existing is not None and getattr(existing, "warm_inventory", False):
+            existing.warm_inventory = False
+            watcher.warm_inventory = True
+            watcher._idle_wake.set()
         _watchers[key] = watcher
     for old_watcher in ([existing] if existing is not None else stale_watchers):
         old_watcher.stop()

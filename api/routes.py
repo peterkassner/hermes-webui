@@ -3,6 +3,8 @@ Hermes Web UI -- Route handlers for GET and POST endpoints.
 Extracted from server.py (Sprint 11) so server.py is a thin shell.
 """
 
+from api.models import SessionInventoryUnavailable
+
 import html as _html
 import contextlib
 import copy
@@ -2977,6 +2979,9 @@ def _build_session_list_cache_payload(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     diag=None,
+    discovery_intent: str = "all",
+    _metadata: dict | None = None,
+    _metadata_only: bool = False,
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
 
@@ -3015,210 +3020,249 @@ def _build_session_list_cache_payload(
         # routes.all_sessions with the historical diag-only signature.
         return all_sessions(diag=diag)
 
-    diag_stage("all_sessions")
-    webui_sessions = _all_sessions_for_sidebar()
-    diag_stage("reconcile_stale_stream_state")
-    if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
-        diag_stage("all_sessions_after_stale_stream_reconcile")
+    if _metadata is None:
+        diag_stage("all_sessions")
         webui_sessions = _all_sessions_for_sidebar()
-    diag_stage("normalize_cli_rows")
-    show_cli_sessions = bool(show_cli_sessions)
-    show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
-    show_cron_sessions = bool(show_cron_sessions)
-    show_webhook_sessions = bool(show_webhook_sessions)
-    show_kanban_sessions = bool(show_kanban_sessions)
-    webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-    if show_cli_sessions:
-        diag_stage("get_cli_sessions")
-        if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
-            cli = get_cli_sessions(
+        diag_stage("reconcile_stale_stream_state")
+        if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
+            diag_stage("all_sessions_after_stale_stream_reconcile")
+            webui_sessions = _all_sessions_for_sidebar()
+        diag_stage("normalize_cli_rows")
+        show_cli_sessions = bool(show_cli_sessions)
+        show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
+        show_cron_sessions = bool(show_cron_sessions)
+        show_webhook_sessions = bool(show_webhook_sessions)
+        show_kanban_sessions = bool(show_kanban_sessions)
+        webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+        if show_cli_sessions:
+            diag_stage("get_cli_sessions")
+            cli_kwargs = {"source_filter": source_filter, "all_profiles": all_profiles}
+            if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
+                cli_kwargs["include_claude_code"] = show_claude_code_sessions
+            if _callable_accepts_kwarg(get_cli_sessions, "discovery_intent"):
+                cli_kwargs["discovery_intent"] = discovery_intent
+            if _callable_accepts_kwarg(get_cli_sessions, "require_complete"):
+                cli_kwargs["require_complete"] = True
+            if _metadata_only and _callable_accepts_kwarg(get_cli_sessions, "force_refresh"):
+                cli_kwargs["force_refresh"] = True
+            cli = get_cli_sessions(**cli_kwargs)
+            diag_stage("merge_cli_sessions")
+            cli_by_id = {s["session_id"]: s for s in cli}
+            webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
+                webui_sessions,
+                known_agent_ids=cli_by_id,
+                diag_stage=diag_stage,
+            )
+            # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or
+            # API-server session is clicked in WebUI it gets a WebUI-owned sidecar
+            # that all_sessions() returns independently of state.db. If the user
+            # later deletes the backing agent session outside WebUI, the sidecar is
+            # never pruned and the stale row lingers in the sidebar forever (there
+            # is no WebUI delete affordance for read-only imported rows).
+            # Drop rows whose backing agent row is genuinely gone. We probe
+            # state.db directly (agent_session_rows_existing) rather than trust
+            # cli_by_id absence, because get_cli_sessions() caps at
+            # CLI_VISIBLE_SESSION_LIMIT (20) — an existing session can fall
+            # out of that window and look deleted. Native WebUI sessions
+            # (source == "webui") that merely have a CLI ancestor are never
+            # pruned by this path.
+            #
+            # #4985: parallel pass for native-WebUI rows that have a backing
+            # agent row in state.db but zero messages (a `+`-click that opened a
+            # row but the first turn never committed, or a sidebar nav that
+            # opened then closed before any message landed). The same #3238
+            # helper doesn't catch these because source == "webui" is excluded
+            # above, and the WebUI delete affordance isn't exposed for them,
+            # so they would otherwise linger forever. Inflight first-turn
+            # safety is preserved by gating on `active_stream_id` (after
+            # _reconcile_stale_stream_state has cleared stale stream ids).
+            _orphan_probe_rows = []
+            _kept_after_orphan_prune = []
+            for s in webui_sessions:
+                _sid = s.get("session_id")
+                if (
+                    _sid
+                    and (
+                        is_cli_session_row(s)
+                        or _is_api_server_sidecar_row(s)
+                    )
+                    and not _session_source_is_webui(s)
+                    and _sid not in cli_by_id
+                ):
+                    _orphan_probe_rows.append(s)
+                else:
+                    _kept_after_orphan_prune.append(s)
+            if _orphan_probe_rows:
+                rows_by_profile: dict[object, list[dict]] = defaultdict(list)
+                for row in _orphan_probe_rows:
+                    rows_by_profile[row.get("profile")].append(row)
+                missing_orphan_ids: set[str] = set()
+                for profile_key, rows in rows_by_profile.items():
+                    probe_ids = [
+                        str(row.get("session_id")).strip()
+                        for row in rows
+                        if str(row.get("session_id") or "").strip()
+                    ]
+                    existing = agent_session_rows_existing(
+                        probe_ids,
+                        profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+                    )
+                    for row in rows:
+                        _sid = str(row.get("session_id") or "").strip()
+                        if _sid and _sid not in existing:
+                            missing_orphan_ids.add(_sid)
+                for s in _orphan_probe_rows:
+                    _sid = str(s.get("session_id") or "").strip()
+                    if _sid in missing_orphan_ids:
+                        try:
+                            prune_session_from_index(_sid)
+                        except Exception:
+                            logger.debug(
+                                "Failed to prune orphaned agent sidecar %s",
+                                _sid,
+                                exc_info=True,
+                            )
+                        diag_stage("prune_orphaned_agent_sidecar")
+                        continue
+                    _kept_after_orphan_prune.append(s)
+            # #4985 second pass — probe state.db.messages for native-WebUI rows
+            # that *survived* the upstream all_sessions() #1171 keep-filter (so
+            # the row is TITLED or has a POSITIVE message_count, meaning it IS
+            # shown in the sidebar — and the 404 click reported in #4985 happens),
+            # BUT whose actual state.db.messages table is empty (the ground-truth
+            # probe). This is the orphan shape #4985 actually describes: a row
+            # that lingers VISIBLY in the sidebar because of a stale positive
+            # message_count or a title set before the first turn committed.
+            #
+            # The (title!='Untitled' OR count>0) clause is the part that makes
+            # this gate actually reach a row #1171 kept. Without it, the gate is
+            # a no-op because all_sessions() at api/models.py:3892-3898 and
+            # 3946-3952 has already stripped every (Untitled ∧ count==0 ∧
+            # ¬active_stream_id ∧ ¬has_pending_user_message ∧ ¬worktree_path)
+            # row before this point — making the earlier 6-condition gate a
+            # no-op against the real pipeline (review IC_kwDOR1LuPM8AAAABHrkF1Q).
+            #
+            # Implementation lives in ``_prune_orphaned_webui_zero_message_sessions``
+            # above so the prune runs in BOTH branches of this function
+            # (``if show_cli_sessions:`` AND ``else:``). Established installs
+            # have ``settings.show_cli_sessions`` pinned to False (per
+            # api/config.py:7637-7648) and those are exactly the long-time
+            # users who accumulated the #4985 404 orphans — without hoisting,
+            # the ``else:`` branch silently skipped the prune
+            # (review IC_kwDOR1LuPM8AAAABHsyFGg).
+            #
+            # Inflight / worktree / pending safety: same as before — any row
+            # still carrying active_stream_id / has_pending_user_message /
+            # worktree_path is never pruned, even if its messages table is
+            # momentarily empty. _reconcile_stale_stream_state_for_session_rows
+            # at line 2224 has already cleared stale stream ids above this point.
+            webui_sessions = _prune_orphaned_webui_zero_message_sessions(
+                _kept_after_orphan_prune,
+                diag_stage=diag_stage,
+            )
+            for s in webui_sessions:
+                meta = cli_by_id.get(s.get("session_id"))
+                if not meta:
+                    continue
+                if _is_messaging_session_record(meta):
+                    s.update(_merge_cli_sidebar_metadata(s, meta))
+                    if s.get("session_id") != meta.get("session_id"):
+                        s["session_id"] = meta.get("session_id")
+                else:
+                    for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                        if not s.get(key) and meta.get(key):
+                            s[key] = meta[key]
+            webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+            # Apply the same CLI visibility semantics to imported local copies so
+            # low-value imported artifacts do not leak into the sidebar.
+            webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+            represented_webui_ids = set()
+            for s in webui_sessions:
+                represented_webui_ids.update(_session_lineage_ids(s))
+            deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
+                cli,
+                represented_webui_ids,
+                show_cron_sessions=show_cron_sessions,
+                show_webhook_sessions=show_webhook_sessions,
+                show_kanban_sessions=show_kanban_sessions,
                 source_filter=source_filter,
-                all_profiles=all_profiles,
-                include_claude_code=show_claude_code_sessions,
             )
         else:
-            # Focused tests sometimes monkeypatch routes.get_cli_sessions with
-            # the historical two-keyword signature.
-            cli = get_cli_sessions(
-                source_filter=source_filter,
-                all_profiles=all_profiles,
+            webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
+                webui_sessions,
+                diag_stage=diag_stage,
             )
-        diag_stage("merge_cli_sessions")
-        cli_by_id = {s["session_id"]: s for s in cli}
-        webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
-            webui_sessions,
-            known_agent_ids=cli_by_id,
-            diag_stage=diag_stage,
+            diag_stage("filter_webui_sessions")
+            webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+            # #4985 second pass — see _prune_orphaned_webui_zero_message_sessions
+            # for the gate predicate and the post-#1171-survivor rationale. The
+            # prune MUST run here too: established installs have
+            # ``settings.show_cli_sessions`` pinned to False
+            # (api/config.py:7637-7648) and those are exactly the long-time
+            # users who accumulated the 404 orphans — review
+            # IC_kwDOR1LuPM8AAAABHsyFGg. Without this call the else branch
+            # silently skipped the prune and the sidebar kept dangling rows.
+            webui_sessions = _prune_orphaned_webui_zero_message_sessions(
+                webui_sessions,
+                diag_stage=diag_stage,
+            )
+            deduped_cli = []
+        diag_stage("sort_sessions")
+        merged = webui_sessions + deduped_cli
+        merged.sort(
+            key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
+            reverse=True,
         )
-        # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or
-        # API-server session is clicked in WebUI it gets a WebUI-owned sidecar
-        # that all_sessions() returns independently of state.db. If the user
-        # later deletes the backing agent session outside WebUI, the sidecar is
-        # never pruned and the stale row lingers in the sidebar forever (there
-        # is no WebUI delete affordance for read-only imported rows).
-        # Drop rows whose backing agent row is genuinely gone. We probe
-        # state.db directly (agent_session_rows_existing) rather than trust
-        # cli_by_id absence, because get_cli_sessions() caps at
-        # CLI_VISIBLE_SESSION_LIMIT (20) — an existing session can fall
-        # out of that window and look deleted. Native WebUI sessions
-        # (source == "webui") that merely have a CLI ancestor are never
-        # pruned by this path.
-        #
-        # #4985: parallel pass for native-WebUI rows that have a backing
-        # agent row in state.db but zero messages (a `+`-click that opened a
-        # row but the first turn never committed, or a sidebar nav that
-        # opened then closed before any message landed). The same #3238
-        # helper doesn't catch these because source == "webui" is excluded
-        # above, and the WebUI delete affordance isn't exposed for them,
-        # so they would otherwise linger forever. Inflight first-turn
-        # safety is preserved by gating on `active_stream_id` (after
-        # _reconcile_stale_stream_state has cleared stale stream ids).
-        _orphan_probe_rows = []
-        _kept_after_orphan_prune = []
-        for s in webui_sessions:
-            _sid = s.get("session_id")
-            if (
-                _sid
-                and (
-                    is_cli_session_row(s)
-                    or _is_api_server_sidecar_row(s)
-                )
-                and not _session_source_is_webui(s)
-                and _sid not in cli_by_id
-            ):
-                _orphan_probe_rows.append(s)
-            else:
-                _kept_after_orphan_prune.append(s)
-        if _orphan_probe_rows:
-            rows_by_profile: dict[object, list[dict]] = defaultdict(list)
-            for row in _orphan_probe_rows:
-                rows_by_profile[row.get("profile")].append(row)
-            missing_orphan_ids: set[str] = set()
-            for profile_key, rows in rows_by_profile.items():
-                probe_ids = [
-                    str(row.get("session_id")).strip()
-                    for row in rows
-                    if str(row.get("session_id") or "").strip()
-                ]
-                existing = agent_session_rows_existing(
-                    probe_ids,
-                    profile=profile_key if isinstance(profile_key, str) and profile_key else None,
-                )
-                for row in rows:
-                    _sid = str(row.get("session_id") or "").strip()
-                    if _sid and _sid not in existing:
-                        missing_orphan_ids.add(_sid)
-            for s in _orphan_probe_rows:
-                _sid = str(s.get("session_id") or "").strip()
-                if _sid in missing_orphan_ids:
-                    try:
-                        prune_session_from_index(_sid)
-                    except Exception:
-                        logger.debug(
-                            "Failed to prune orphaned agent sidecar %s",
-                            _sid,
-                            exc_info=True,
-                        )
-                    diag_stage("prune_orphaned_agent_sidecar")
-                    continue
-                _kept_after_orphan_prune.append(s)
-        # #4985 second pass — probe state.db.messages for native-WebUI rows
-        # that *survived* the upstream all_sessions() #1171 keep-filter (so
-        # the row is TITLED or has a POSITIVE message_count, meaning it IS
-        # shown in the sidebar — and the 404 click reported in #4985 happens),
-        # BUT whose actual state.db.messages table is empty (the ground-truth
-        # probe). This is the orphan shape #4985 actually describes: a row
-        # that lingers VISIBLY in the sidebar because of a stale positive
-        # message_count or a title set before the first turn committed.
-        #
-        # The (title!='Untitled' OR count>0) clause is the part that makes
-        # this gate actually reach a row #1171 kept. Without it, the gate is
-        # a no-op because all_sessions() at api/models.py:3892-3898 and
-        # 3946-3952 has already stripped every (Untitled ∧ count==0 ∧
-        # ¬active_stream_id ∧ ¬has_pending_user_message ∧ ¬worktree_path)
-        # row before this point — making the earlier 6-condition gate a
-        # no-op against the real pipeline (review IC_kwDOR1LuPM8AAAABHrkF1Q).
-        #
-        # Implementation lives in ``_prune_orphaned_webui_zero_message_sessions``
-        # above so the prune runs in BOTH branches of this function
-        # (``if show_cli_sessions:`` AND ``else:``). Established installs
-        # have ``settings.show_cli_sessions`` pinned to False (per
-        # api/config.py:7637-7648) and those are exactly the long-time
-        # users who accumulated the #4985 404 orphans — without hoisting,
-        # the ``else:`` branch silently skipped the prune
-        # (review IC_kwDOR1LuPM8AAAABHsyFGg).
-        #
-        # Inflight / worktree / pending safety: same as before — any row
-        # still carrying active_stream_id / has_pending_user_message /
-        # worktree_path is never pruned, even if its messages table is
-        # momentarily empty. _reconcile_stale_stream_state_for_session_rows
-        # at line 2224 has already cleared stale stream ids above this point.
-        webui_sessions = _prune_orphaned_webui_zero_message_sessions(
-            _kept_after_orphan_prune,
-            diag_stage=diag_stage,
-        )
-        for s in webui_sessions:
-            meta = cli_by_id.get(s.get("session_id"))
-            if not meta:
-                continue
-            if _is_messaging_session_record(meta):
-                s.update(_merge_cli_sidebar_metadata(s, meta))
-                if s.get("session_id") != meta.get("session_id"):
-                    s["session_id"] = meta.get("session_id")
-            else:
-                for key in ("source_tag", "raw_source", "session_source", "source_label"):
-                    if not s.get(key) and meta.get(key):
-                        s[key] = meta[key]
-        webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-        # Apply the same CLI visibility semantics to imported local copies so
-        # low-value imported artifacts do not leak into the sidebar.
-        webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
-        represented_webui_ids = set()
-        for s in webui_sessions:
-            represented_webui_ids.update(_session_lineage_ids(s))
-        deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
-            cli,
-            represented_webui_ids,
-            show_cron_sessions=show_cron_sessions,
-            show_webhook_sessions=show_webhook_sessions,
-            show_kanban_sessions=show_kanban_sessions,
-            source_filter=source_filter,
-        )
+        # Each sidebar tab is loaded on its own, so a child can arrive without its parent's row.
+        # Stamp the parent's tab (the same classifier _filter_sidebar_source uses) on the child.
+        # Only within one profile: a parent in another profile is filtered out of this child's
+        # view, so its tab says nothing about where the child belongs — leave the hint unset.
+        _merged_by_id = {s.get("session_id"): s for s in merged if s.get("session_id")}
+        for s in merged:
+            _parent = _merged_by_id.get(s.get("parent_session_id"))
+            if _parent is not None and _profiles_match(_parent.get("profile"), s.get("profile")):
+                s["parent_is_cli_session"] = _is_cli_session_for_settings(_parent)
     else:
-        webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
-            webui_sessions,
-            diag_stage=diag_stage,
-        )
-        diag_stage("filter_webui_sessions")
-        webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
-        # #4985 second pass — see _prune_orphaned_webui_zero_message_sessions
-        # for the gate predicate and the post-#1171-survivor rationale. The
-        # prune MUST run here too: established installs have
-        # ``settings.show_cli_sessions`` pinned to False
-        # (api/config.py:7637-7648) and those are exactly the long-time
-        # users who accumulated the 404 orphans — review
-        # IC_kwDOR1LuPM8AAAABHsyFGg. Without this call the else branch
-        # silently skipped the prune and the sidebar kept dangling rows.
-        webui_sessions = _prune_orphaned_webui_zero_message_sessions(
-            webui_sessions,
-            diag_stage=diag_stage,
-        )
-        deduped_cli = []
-    diag_stage("sort_sessions")
-    merged = webui_sessions + deduped_cli
-    merged.sort(
-        key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
-        reverse=True,
-    )
-    # Each sidebar tab is loaded on its own, so a child can arrive without its parent's row.
-    # Stamp the parent's tab (the same classifier _filter_sidebar_source uses) on the child.
-    # Only within one profile: a parent in another profile is filtered out of this child's
-    # view, so its tab says nothing about where the child belongs — leave the hint unset.
-    _merged_by_id = {s.get("session_id"): s for s in merged if s.get("session_id")}
-    for s in merged:
-        _parent = _merged_by_id.get(s.get("parent_session_id"))
-        if _parent is not None and _profiles_match(_parent.get("profile"), s.get("profile")):
-            s["parent_is_cli_session"] = _is_cli_session_for_settings(_parent)
+        merged = [dict(row) for row in _metadata.get("sessions", [])]
+        # Only the count is used after this boundary.
+        deduped_cli = [None] * int(_metadata.get("cli_count", 0))
+    if _metadata_only:
+        raw = {"sessions": merged, "cli_count": len(deduped_cli)}
+        # Preserve the existing top-N lineage coverage AFTER presentation
+        # filters. Newer archived/hidden rows must not consume a visible tab's
+        # allowance. Gather the union once, then enrich bounded batches here;
+        # warmed readers perform no lineage discovery of their own.
+        try:
+            lineage_cap = int(os.environ.get("HERMES_WEBUI_LINEAGE_TOP_N", "300"))
+        except (TypeError, ValueError):
+            lineage_cap = 300
+        candidates = {}
+        for archived in (False, True):
+            for hidden in (False, True):
+                for tab in (None, "webui", "cli"):
+                    selected = _build_session_list_cache_payload(
+                        active_profile=active_profile, all_profiles=all_profiles,
+                        show_cli_sessions=show_cli_sessions,
+                        show_claude_code_sessions=show_claude_code_sessions,
+                        show_previous_messaging_sessions=show_previous_messaging_sessions,
+                        show_cron_sessions=show_cron_sessions,
+                        show_webhook_sessions=show_webhook_sessions,
+                        show_kanban_sessions=show_kanban_sessions,
+                        source_filter=source_filter, discovery_intent=discovery_intent,
+                        include_archived=archived, exclude_hidden=hidden,
+                        visible_only=True, sidebar_source=tab, _metadata=raw,
+                    )["sessions"]
+                    for row in selected[:lineage_cap] if lineage_cap > 0 else selected:
+                        candidates[(row.get("profile"), row.get("session_id"))] = row
+        rows = list(candidates.values())
+        batch_size = lineage_cap if lineage_cap > 0 else max(1, len(rows))
+        for offset in range(0, len(rows), batch_size):
+            _enrich_sidebar_lineage_metadata(rows[offset:offset + batch_size])
+        for row in merged:
+            enriched = candidates.get((row.get("profile"), row.get("session_id")))
+            if enriched is not None:
+                row.update(enriched)
+        return raw
     # ── Profile scoping (#1611) ────────────────────────────────────────
     # Default: filter to the active profile. ?all_profiles=1 opts into
     # the aggregate view used by the "All profiles" sidebar toggle.
@@ -3315,7 +3359,8 @@ def _build_session_list_cache_payload(
     if not include_archived:
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
-    _enrich_sidebar_lineage_metadata(scoped)
+    if _metadata is None:
+        _enrich_sidebar_lineage_metadata(scoped)
     # Delegated subagent children (#5307) are view-only, owned by the delegate
     # runner. The model-layer batch overlay above has already applied the
     # authoritative source and view-only flags before this route runs.
@@ -3362,6 +3407,162 @@ def _build_session_list_cache_payload(
             "show_kanban_sessions": show_kanban_sessions,
         },
     }
+
+
+def _interactive_inventory_options(active_profile=None, all_profiles=False, discovery_intent="interactive"):
+    """Capture metadata identity without capturing a request or diagnostics object."""
+    from api.profiles import get_active_profile_name
+    settings = load_settings()
+    source_filter = settings.get("agent_session_source_filter")
+    if discovery_intent == "interactive" and str(source_filter or "").lower() in ("cron", "webhook", "kanban"):
+        source_filter = None
+    return dict(
+        active_profile=active_profile or get_active_profile_name(),
+        all_profiles=bool(all_profiles),
+        show_cli_sessions=bool(settings.get("show_cli_sessions")),
+        show_claude_code_sessions=bool(settings.get("show_claude_code_sessions")),
+        show_previous_messaging_sessions=bool(settings.get("show_previous_messaging_sessions")),
+        show_cron_sessions=bool(settings.get("show_cron_sessions")),
+        show_webhook_sessions=bool(settings.get("show_webhook_sessions")),
+        show_kanban_sessions=bool(settings.get("show_kanban_sessions")),
+        source_filter=source_filter,
+        discovery_intent=discovery_intent,
+    )
+
+
+def _shared_inventory_key(options):
+    from api.profiles import get_active_hermes_home
+    args = {k: v for k, v in options.items() if k != "discovery_intent"}
+    # The common snapshot includes archived/hidden rows; presentation filters
+    # are applied below without another backing-store discovery.
+    return _session_list_cache_key(**args, include_archived=True) + (
+        "warm_metadata", str(Path(get_active_hermes_home()).resolve()),
+        options["discovery_intent"],
+    )
+
+
+def _get_shared_session_list_payload(*, diag=None, **options):
+    from api.models import SessionInventoryUnavailable
+    from api.profiles import get_active_hermes_home
+    metadata_options = {k: v for k, v in options.items() if k not in {
+        "include_archived", "exclude_hidden", "visible_only", "sidebar_source",
+        "archived_limit", "archived_offset",
+    }}
+    metadata_options.setdefault("discovery_intent", "interactive")
+    if metadata_options["discovery_intent"] != "interactive":
+        metadata_options["show_cli_sessions"] = True
+        metadata_options["source_filter"] = metadata_options["discovery_intent"]
+        key = _shared_inventory_key(metadata_options)
+        key = tuple("view_metadata" if v == "warm_metadata" else v for v in key)
+        def build_view_metadata():
+            if str(Path(get_active_hermes_home()).resolve()) != key[-2]:
+                raise SessionInventoryUnavailable("Session profile changed; retry shortly")
+            return _build_session_list_cache_payload(
+                **metadata_options, include_archived=True, _metadata_only=True)
+        metadata = _get_cached_session_list_payload(key=key, builder=build_view_metadata, diag=diag)
+        return _build_session_list_cache_payload(**options, _metadata=metadata, diag=diag)
+    if str(metadata_options.get("source_filter") or "").lower() in ("cron", "webhook", "kanban"):
+        metadata_options["source_filter"] = None
+    key = _shared_inventory_key(metadata_options)
+    home = str(Path(get_active_hermes_home()).resolve())
+    _route_session_list_cache.admit_warm_scope(key, metadata_options, home)
+    metadata, fresh = _session_list_cache_get(key, allow_stale=True)
+    if metadata is None or not fresh:
+        # Warm readers never enumerate synchronously. Claim before starting the
+        # worker so a four-client burst still creates exactly one builder.
+        _refresh_shared_inventory(key, metadata_options, background=True)
+        with _SESSIONS_CACHE_LOCK:
+            pending = _SESSIONS_CACHE_INFLIGHT.get(key)
+        if pending is not None and metadata is None:
+            pending.wait(_SESSIONS_CACHE_WAIT_SECONDS)
+        metadata, fresh = _session_list_cache_get(key, allow_stale=True)
+    if metadata is None or not fresh:
+        # A changed source may include deletions/visibility revocation: it is not
+        # eligible stale data. Age alone is safe while reconciliation owns it.
+        if metadata is None or _session_list_cache_stale_reason(key) == "source":
+            raise SessionInventoryUnavailable("Session inventory is loading; retry shortly")
+    return _build_session_list_cache_payload(**options, _metadata=metadata, diag=diag)
+
+
+def _refresh_shared_inventory(key, options, *, background=False):
+    from api.profiles import set_request_profile, clear_request_profile
+    event, owner = _session_list_cache_claim_rebuild(key)
+    if not owner:
+        return
+    generation = _session_list_cache_invalidation_stamp(key)
+    def build():
+        try:
+            # Detached metadata work needs profile TLS, never process-env changes.
+            from api import profiles as profiles_api
+            previous = getattr(profiles_api._tls, "profile", None)
+            set_request_profile(options["active_profile"] or "default")
+            try:
+                if _shared_inventory_key(options) != key:
+                    return  # Removed/replaced profile or changed home.
+                if not _route_session_list_cache.warm_scope_is_current(key):
+                    return
+                for _attempt in range(3):
+                    if generation != _session_list_cache_invalidation_stamp(key):
+                        return
+                    fingerprint = _route_session_list_cache.warm_scope_fingerprint(key)
+                    source_stamp = _session_list_cache_source_stamp(key)
+                    payload = _build_session_list_cache_payload(**options, include_archived=True, _metadata_only=True)
+                    if (fingerprint == _route_session_list_cache.warm_scope_fingerprint(key)
+                            and source_stamp == _session_list_cache_source_stamp(key)
+                            and _session_list_cache_set(key, payload, expected_invalidation_stamp=generation)):
+                        _route_session_list_cache.mark_warm_scope_refreshed(key, fingerprint)
+                        return
+            finally:
+                if previous is None:
+                    clear_request_profile()
+                else:
+                    set_request_profile(previous)
+        except Exception:
+            logger.debug("Warm session inventory refresh failed", exc_info=True)
+        finally:
+            _session_list_cache_done(key, event)
+    if background:
+        try:
+            threading.Thread(target=build, name="session-list-cache-rebuild", daemon=True).start()
+        except Exception:
+            _session_list_cache_done(key, event)
+            raise
+    else:
+        build()
+
+
+def _reconcile_warm_session_inventories(*, startup=False):
+    """Called by the existing watcher owner, including with zero browsers."""
+    from api.profiles import set_request_profile, clear_request_profile, get_hermes_home_for_profile
+    if startup:
+        options = _interactive_inventory_options()
+        key = _shared_inventory_key(options)
+        _route_session_list_cache.admit_warm_scope(key, options, key[-2], startup=True)
+    for key, options, home in _route_session_list_cache.warm_scope_snapshot():
+        from api import profiles as profiles_api
+        previous = getattr(profiles_api._tls, "profile", None)
+        try:
+            set_request_profile(options["active_profile"] or "default")
+            if (not Path(home).exists() or
+                    str(Path(get_hermes_home_for_profile(options["active_profile"] or "default")).resolve()) != home):
+                _route_session_list_cache.retire_warm_scope(key)
+                continue
+            current_options = _interactive_inventory_options(options["active_profile"], options["all_profiles"], options["discovery_intent"])
+            if current_options != options or _shared_inventory_key(options) != key:
+                pinned = _route_session_list_cache.warm_scope_is_startup(key)
+                _route_session_list_cache.retire_warm_scope(key)
+                new_key = _shared_inventory_key(current_options)
+                _route_session_list_cache.admit_warm_scope(new_key, current_options, home, startup=pinned)
+                options, key = current_options, new_key
+            if _route_session_list_cache.warm_scope_needs_refresh(key):
+                _refresh_shared_inventory(key, options)
+        except Exception:
+            logger.debug("Warm scope reconciliation failed", exc_info=True)
+        finally:
+            if previous is None:
+                clear_request_profile()
+            else:
+                set_request_profile(previous)
 
 
 def _session_list_payload_to_response(payload: dict) -> dict:
@@ -3492,6 +3693,9 @@ def _get_cached_session_list_payload(
                     pass
 
             def _rebuild_stale_session_list_cache():
+                from api import profiles as profiles_api
+                previous_profile = getattr(profiles_api._tls, "profile", None)
+                profiles_api.set_request_profile(key[0])
                 try:
                     rebuild_attempts = 0
                     while True:
@@ -3516,6 +3720,10 @@ def _get_cached_session_list_payload(
                         if rebuild_attempts >= 3:
                             return
                 finally:
+                    if previous_profile is None:
+                        profiles_api.clear_request_profile()
+                    else:
+                        profiles_api.set_request_profile(previous_profile)
                     _session_list_cache_done(key, event)
 
             try:
@@ -3567,7 +3775,8 @@ def _get_cached_session_list_payload(
                     except Exception:
                         pass
                 if rebuild_attempts >= 3:
-                    return payload
+                    from api.models import SessionInventoryUnavailable
+                    raise SessionInventoryUnavailable("Session inventory changed during loading; retry shortly")
         finally:
             _session_list_cache_done(key, event)
 
@@ -3603,21 +3812,8 @@ def _get_cached_session_list_payload(
                 pass
         return stale
 
-    # Safety path if the owner died before storing anything.
-    if diag is not None:
-        try:
-            diag.stage("session_list_cache_fallback_rebuild")
-        except Exception:
-            pass
-    invalidation_stamp = _session_list_cache_invalidation_stamp(key)
-    payload = builder()
-    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-        _session_list_cache_set(
-            key,
-            payload,
-            expected_invalidation_stamp=invalidation_stamp,
-        )
-    return payload
+    from api.models import SessionInventoryUnavailable
+    raise SessionInventoryUnavailable("Session inventory is loading; retry shortly")
 
 from api.config import (
     STATE_DIR,
@@ -10229,22 +10425,14 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
     except Exception:
         logger.debug("cli session metadata lookup failed", exc_info=True)
 
-    # Nothing cached yet: keep the original enumeration as the source of truth,
-    # resolved through the module-level name so callers that replace
-    # get_cli_sessions() (tests, plugins) still control what this returns. The
-    # fast path is an optimisation, not a second source of truth (#8412 review:
-    # git-info answered 404 for a session the enumeration did return).
+    row = _route_session_list_cache.lookup_warm_session_row(session_id, all_profiles=all_profiles)
+    if row:
+        return row
     try:
-        for row in get_cli_sessions(all_profiles=all_profiles):
-            if row.get("session_id") == session_id:
-                return row
-        for source in _CLI_LOOKUP_FALLBACK_SOURCES:
-            row = get_cli_session_by_id(session_id, source, all_profiles=all_profiles)
-            if row:
-                return row
+        return get_cli_session_by_id(session_id, all_profiles=all_profiles)
     except Exception:
+        logger.debug("Exact session metadata lookup failed", exc_info=True)
         return {}
-    return {}
 
 
 def _session_index_marks_was_webui(sid: str) -> bool:
@@ -17453,53 +17641,27 @@ def handle_get(handler, parsed) -> bool:
             sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
             if sidebar_source not in ("webui", "cli"):
                 sidebar_source = None
-            # /api/sessions is the default sidebar contract, so keep the route-owned
-            # visible-row filter in the shared cache builder for both cache hits and misses.
-            key = _session_list_cache_key(
-                active_profile=active_profile,
-                all_profiles=all_profiles,
+            discovery_intent = parse_qs(parsed.query).get("inventory", ["interactive"])[0]
+            if discovery_intent not in ("interactive", "cron", "webhook", "kanban"):
+                return j(handler, {"error": "Invalid session inventory"}, 400)
+            payload = _get_shared_session_list_payload(
+                active_profile=active_profile, all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
                 show_claude_code_sessions=show_claude_code_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
-                include_archived=include_archived,
-                exclude_hidden=exclude_hidden,
-                visible_only=True,
                 show_webhook_sessions=show_webhook_sessions,
                 show_kanban_sessions=show_kanban_sessions,
                 source_filter=agent_session_source_filter,
-                sidebar_source=sidebar_source,
-                archived_limit=archived_limit,
-                archived_offset=archived_offset,
-            )
-            # Keep the visible /api/sessions contract unchanged even though the
-            # heavy lifting now lives in the cache builder: profile scoping via
-            # `_profiles_match(s.get("profile"), active_profile)` still happens
-            # before `_keep_latest_messaging_session_per_source(`.
-            payload = _get_cached_session_list_payload(
-                key=key,
-                builder=lambda: _build_session_list_cache_payload(
-                    active_profile=active_profile,
-                    all_profiles=all_profiles,
-                    show_cli_sessions=show_cli_sessions,
-                    show_claude_code_sessions=show_claude_code_sessions,
-                    show_previous_messaging_sessions=show_previous_messaging_sessions,
-                    show_cron_sessions=show_cron_sessions,
-                    include_archived=include_archived,
-                    exclude_hidden=exclude_hidden,
-                    visible_only=True,
-                    show_webhook_sessions=show_webhook_sessions,
-                    show_kanban_sessions=show_kanban_sessions,
-                    source_filter=agent_session_source_filter,
-                    sidebar_source=sidebar_source,
-                    archived_limit=archived_limit,
-                    archived_offset=archived_offset,
-                    diag=diag,
-                ),
-                diag=diag,
+                include_archived=include_archived, exclude_hidden=exclude_hidden,
+                visible_only=True, sidebar_source=sidebar_source,
+                archived_limit=archived_limit, archived_offset=archived_offset,
+                discovery_intent=discovery_intent, diag=diag,
             )
             diag.stage("response_write")
             return j(handler, _session_list_payload_to_response(payload), pretty=False)
+        except SessionInventoryUnavailable as exc:
+            return j(handler, {"error": str(exc), "retryable": True}, 503)
         finally:
             diag.finish()
 
@@ -24107,9 +24269,13 @@ def _handle_gateway_sse_stream(handler, parsed):
     q = watcher.subscribe()
     try:
         # Send initial snapshot immediately
-        from api.models import get_cli_sessions
-        initial = get_cli_sessions()
-        _sse(handler, 'sessions_changed', {'sessions': initial})
+        # SSE boot/reconnect shares the same interactive builder as HTTP clients.
+        # Do not enumerate background histories merely to open a notification pipe.
+        try:
+            initial = _get_shared_session_list_payload(**_interactive_inventory_options())
+            _sse(handler, 'sessions_changed', {'sessions': initial.get('sessions', [])})
+        except SessionInventoryUnavailable:
+            _sse_keepalive(handler)  # The watcher publishes when the owner finishes.
 
         while True:
             try:
@@ -34543,7 +34709,7 @@ def _handle_handoff_summary(handler, body):
     def _resolve_handoff_channel_label():
         channel_label = None
         try:
-            from api.models import get_session as _get_session, get_cli_sessions
+            from api.models import get_session as _get_session
 
             session_meta = _get_session(sid)
             channel_label = (
@@ -34553,15 +34719,9 @@ def _handle_handoff_summary(handler, body):
                 or session_meta.session_source
             )
             if not channel_label:
-                for candidate in get_cli_sessions():
-                    if candidate.get("session_id") == sid:
-                        channel_label = (
-                            candidate.get("source_label")
-                            or candidate.get("raw_source")
-                            or candidate.get("source_tag")
-                            or candidate.get("source")
-                        )
-                        break
+                candidate = _lookup_cli_session_metadata(sid)
+                channel_label = (candidate.get("source_label") or candidate.get("raw_source")
+                                 or candidate.get("source_tag") or candidate.get("source"))
         except Exception:
             pass
         return channel_label

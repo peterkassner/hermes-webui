@@ -361,8 +361,8 @@ def test_changed_revision_falls_back_to_the_enumeration(profiles, monkeypatch):
     assert loads == []
 
 
-def test_recency_eviction_is_not_undone(profiles):
-    """A session evicted from the catalog window must stay absent.
+def test_recency_eviction_preserves_exact_id_reachability(profiles):
+    """A session outside the sidebar window remains directly addressable.
 
     The lookup happens BEFORE any re-enumeration on purpose: enumerating first
     would replace the snapshot and hide the stale-snapshot schedule entirely.
@@ -376,7 +376,7 @@ def test_recency_eviction_is_not_undone(profiles):
 
     _add_newer_sessions(db, prefix="new")
 
-    assert routes._lookup_cli_session_metadata("old-one") == {}
+    assert routes._lookup_cli_session_metadata("old-one")["session_id"] == "old-one"
     assert "old-one" not in {r["session_id"] for r in models.get_cli_sessions()}
 
 

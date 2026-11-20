@@ -11,6 +11,12 @@ the **composer footer** — always visible while composing. A circular context r
 shows token usage at a glance. All settings and session tools are in the
 **Hermes Control Center** (launcher at the sidebar bottom).
 
+Session lists are prepared in the background and shared across connected devices.
+Cron, webhook and kanban histories load when their corresponding view is opened.
+A server restart has an initial preparation interval; a temporary loading failure
+can be retried without treating it as an empty account. See
+[session loading behavior](docs/architecture/warm-session-inventory.md).
+
 Setup Hermes so you can access it natively on every device:
 
 <img width="1467" height="881" alt="image" src="https://github.com/user-attachments/assets/9a72cdf3-a5b4-45ed-a836-a715ce46287e" />

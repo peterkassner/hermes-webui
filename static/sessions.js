@@ -3774,6 +3774,11 @@ function _sessionArchivePagingFilterActive() {
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
   qs.set('sidebar_source', _requestedSessionSidebarSource());
+  // Reserved project names are the server's existing system-project identity.
+  // Ordinary chat never requests background history; opening its chip does.
+  const inventoryProject = (_allProjects || []).find(p => p.project_id === _activeProject);
+  if(inventoryProject && inventoryProject.name === 'Cron Jobs') qs.set('inventory','cron');
+  else if(inventoryProject && inventoryProject.name === 'Webhooks') qs.set('inventory','webhook');
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){

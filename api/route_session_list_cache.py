@@ -42,10 +42,179 @@ _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION: dict[str, int] = {}
+# Admission/lifecycle records only. Rows remain exclusively in _SESSIONS_CACHE.
+_WARM_SCOPES: OrderedDict[tuple, dict] = OrderedDict()
+_WARM_SCOPE_LIMIT = 8
+
+
+def admit_warm_scope(key, options, home, *, startup=False):
+    with _SESSIONS_CACHE_LOCK:
+        entry = _WARM_SCOPES.get(key)
+        if entry is None:
+            _WARM_SCOPES[key] = dict(options=dict(options), home=home,
+                                     startup=startup, fingerprint=None)
+        elif startup:
+            entry["startup"] = True
+        _WARM_SCOPES.move_to_end(key)
+        while len(_WARM_SCOPES) > _WARM_SCOPE_LIMIT:
+            victim = next((k for k, v in _WARM_SCOPES.items() if not v["startup"]), None)
+            if victim is None:
+                break
+            _WARM_SCOPES.pop(victim, None)
+            _session_list_cache_clear(profile=victim[0])
+
+
+def warm_scope_is_current(key):
+    with _SESSIONS_CACHE_LOCK:
+        return key in _WARM_SCOPES
+
+
+def warm_scope_is_startup(key):
+    with _SESSIONS_CACHE_LOCK:
+        return bool(_WARM_SCOPES.get(key, {}).get("startup"))
+
+
+def warm_scope_snapshot():
+    with _SESSIONS_CACHE_LOCK:
+        return [(k, dict(v["options"]), v["home"]) for k, v in _WARM_SCOPES.items()]
+
+
+def retire_warm_scope(key):
+    with _SESSIONS_CACHE_LOCK:
+        _WARM_SCOPES.pop(key, None)
+        _session_list_cache_clear(profile=key[0])
+
+
+def lookup_warm_session_row(session_id, *, all_profiles=False):
+    from api.profiles import get_active_profile_name, get_active_hermes_home
+    profile = get_active_profile_name() or 'default'
+    home = str(Path(get_active_hermes_home()).resolve())
+    for key, _options, scope_home in warm_scope_snapshot():
+        if (key[1] != bool(all_profiles) or scope_home != home
+                or not _profiles_match(key[0], profile)):
+            continue
+        stamp = _session_list_cache_resolved_source_stamp(key)
+        with _SESSIONS_CACHE_LOCK:
+            entry = _SESSIONS_CACHE.get(key)
+            if entry is None or entry[1] != stamp or key not in _WARM_SCOPES:
+                continue
+            rows = [row for row in entry[2].get('sessions', [])
+                    if row.get('session_id') == session_id
+                    and (all_profiles or _profiles_match(row.get('profile'), profile))]
+            if len(rows) == 1:
+                return _session_list_cache_copy_row(rows[0])
+    return {}
+
+
+def warm_gateway_snapshot(profile, home):
+    """Reuse admitted interactive metadata for SSE, without another DB scan.
+
+    None means no warm scope exists (legacy watcher use). An admitted scope
+    still loading returns an empty tuple so the watcher waits for its owner.
+    """
+    with _SESSIONS_CACHE_LOCK:
+        for key, scope in _WARM_SCOPES.items():
+            if (not key[1] and _profiles_match(key[0], profile)
+                    and (home is None or scope['home'] == str(home))):
+                entry = _SESSIONS_CACHE.get(key)
+                if entry is None:
+                    return ()
+                rows = entry[2].get('sessions', [])
+                return [dict(row) for row in rows
+                        if _profiles_match(row.get('profile'), profile)]
+    return None
+
+
+def stop_warm_scopes():
+    """Fence late publication and release cold waiters during server teardown."""
+    with _SESSIONS_CACHE_LOCK:
+        for key in list(_WARM_SCOPES):
+            retire_warm_scope(key)
+            event = _SESSIONS_CACHE_INFLIGHT.pop(key, None)
+            if event is not None:
+                event.set()
+
+    # CLI refresh workers can outlive the bounded watcher join. Fence their
+    # publication too, and wake their followers without waiting on store I/O.
+    from api import models
+    models.clear_cli_sessions_cache()
+    with models._CLI_SESSIONS_CACHE_LOCK:
+        events = list(models._CLI_SESSIONS_CACHE_INFLIGHT.values())
+        models._CLI_SESSIONS_CACHE_INFLIGHT.clear()
+    for event in events:
+        event.set()
+
+
+def _warm_path_identity(path):
+    try:
+        path = Path(path)
+        st = path.stat()
+        return (str(path.resolve()), st.st_dev, st.st_ino, st.st_mtime_ns,
+                st.st_ctime_ns, st.st_size)
+    except FileNotFoundError:
+        return None
+
+
+def warm_scope_fingerprint(key):
+    """Five-second stat reconciliation, including edits and replaced identities.
+
+    No transcript parsing or history projection. ctime/inode catch in-place
+    edits and replacements even when mtime and size happen to stay equal.
+    """
+    from api.profiles import get_active_hermes_home
+    from api.models import _all_profiles_cli_contexts, _default_claude_code_projects_dir
+    home = Path(get_active_hermes_home())
+    paths = [home, home / 'state.db', home / 'state.db-wal', home / 'config.yaml',
+             home / '.env', _session_list_cache_settings_file(),
+             _session_list_cache_session_dir().parent / 'projects.json',
+             _session_list_cache_gateway_session_metadata_path()]
+    session_dir = _session_list_cache_session_dir()
+    paths.append(session_dir)
+    if session_dir.exists():
+        paths.extend(sorted(session_dir.glob('*.json')))
+    if key[1]:
+        contexts, ownership = _all_profiles_cli_contexts()
+        paths.extend(Path(h) for h, db, profile in contexts)
+        for h, db, _profile in contexts:
+            paths.extend((db, Path(str(db) + '-wal'), Path(h) / 'config.yaml'))
+    else:
+        ownership = None
+    # Claude Code is optional global metadata; stat files without parsing them.
+    if key[2] and key[14]:
+        root = _default_claude_code_projects_dir()
+        if root is not None:
+            paths.append(root)
+            from api.models import _iter_claude_code_jsonl_files
+            paths.extend(_iter_claude_code_jsonl_files(root) or ())
+    return (ownership, tuple(_warm_path_identity(p) for p in paths))
+
+
+def warm_scope_needs_refresh(key):
+    fingerprint = warm_scope_fingerprint(key)
+    source_stamp = _session_list_cache_resolved_source_stamp(key)
+    with _SESSIONS_CACHE_LOCK:
+        entry = _WARM_SCOPES.get(key)
+        if entry is None:
+            return False
+        cached = _SESSIONS_CACHE.get(key)
+        changed = entry['fingerprint'] != fingerprint
+        if changed:
+            # Unknown changes can revoke visibility or remove rows. Do not
+            # serve those rows while rebuilding. Age alone never discards them.
+            _SESSIONS_CACHE.pop(key, None)
+        return changed or cached is None or cached[1] != source_stamp
+
+
+def mark_warm_scope_refreshed(key, fingerprint):
+    with _SESSIONS_CACHE_LOCK:
+        if key in _WARM_SCOPES:
+            _WARM_SCOPES[key]['fingerprint'] = fingerprint
+
 
 
 _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "session_id",
+    "attention",
     "title",
     "display_title",
     "_state_db_title",
@@ -390,7 +559,7 @@ def _session_list_cache_get(
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        fresh = (now - ts) < ttl
+        fresh = key in _WARM_SCOPES or (now - ts) < ttl
         if fresh:
             _SESSIONS_CACHE.move_to_end(key)
             return _session_list_cache_copy_payload(payload), True
@@ -441,10 +610,16 @@ def _session_list_cache_set(
             != expected_invalidation_stamp
         ):
             return False
+        if "warm_metadata" in key and key not in _WARM_SCOPES:
+            return False
         _SESSIONS_CACHE[key] = (time.monotonic(), stamp, bounded)
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
-            _SESSIONS_CACHE.popitem(last=False)
+            victim = next((k for k in _SESSIONS_CACHE
+                           if not _WARM_SCOPES.get(k, {}).get("startup")), None)
+            if victim is None:
+                break
+            _SESSIONS_CACHE.pop(victim, None)
     return True
 
 

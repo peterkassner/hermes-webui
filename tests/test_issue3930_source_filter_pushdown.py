@@ -328,17 +328,17 @@ def test_api_sessions_passes_source_filter_only_on_sidebar_path(monkeypatch):
     assert captured == [{"source_filter": "  TUI  ", "all_profiles": False}]
 
 
-def test_non_sidebar_cli_session_callers_keep_default_get_cli_sessions_signature(monkeypatch):
+def test_non_sidebar_cli_session_callers_use_exact_id_reader(monkeypatch):
     captured = []
 
     monkeypatch.setattr(
         routes,
-        "get_cli_sessions",
-        lambda *, all_profiles=False: captured.append(all_profiles) or [{"session_id": "cli-session", "title": "CLI Session"}],
+        "get_cli_session_by_id",
+        lambda sid, *, all_profiles=False: captured.append((sid, all_profiles)) or {"session_id": sid, "title": "CLI Session"},
     )
 
     assert routes._lookup_cli_session_metadata("cli-session") == {
         "session_id": "cli-session",
         "title": "CLI Session",
     }
-    assert captured == [False]
+    assert captured == [("cli-session", False)]

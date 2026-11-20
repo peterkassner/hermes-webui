@@ -649,13 +649,12 @@ def main() -> None:
 
         def _start_watcher_safe():
             try:
-                start_watcher()
+                start_watcher(warm_inventory=True)
             except Exception as e:
                 print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
         t = threading.Thread(target=_start_watcher_safe, daemon=True)
         t.start()
-        t.join(timeout=5)
         if t.is_alive():
             print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
     except Exception as e:

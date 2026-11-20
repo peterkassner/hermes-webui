@@ -9978,7 +9978,7 @@ def _claude_code_title(messages: list[dict], summary_title: str | None) -> str:
     return 'Claude Code Session'
 
 
-def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_files: int = CLAUDE_CODE_MAX_FILES, max_file_bytes: int = CLAUDE_CODE_MAX_FILE_BYTES) -> list:
+def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_files: int = CLAUDE_CODE_MAX_FILES, max_file_bytes: int = CLAUDE_CODE_MAX_FILE_BYTES, session_id: str | None = None) -> list:
     """Read Claude Code JSONL sessions as read-only external-agent rows.
 
     The bridge is additive and defensive: it skips symlinks, oversized files,
@@ -9993,10 +9993,12 @@ def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_file
     # sidebar build (#4718). Resolve it a single time.
     cc_workspace = str(get_last_workspace())
     for path in _iter_claude_code_jsonl_files(projects_dir, max_files=max_files, max_file_bytes=max_file_bytes) or []:
+        sid = _claude_code_session_id(path)
+        if session_id is not None and sid != session_id:
+            continue
         messages, summary_title, first_ts, last_ts = _parse_claude_code_jsonl_cached(path)
         if not messages:
             continue
-        sid = _claude_code_session_id(path)
         # Match the truthiness fallback used in the assignments below: the old
         # inline code was ``first_ts or last_ts or path.stat().st_mtime``, which
         # also fell back to mtime for a falsy-but-not-None ``0.0`` timestamp
@@ -10049,6 +10051,10 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
     return []
 
 
+class SessionInventoryUnavailable(RuntimeError):
+    """A session read is unavailable; callers must retry, not publish emptiness."""
+
+
 def clear_cli_sessions_cache() -> None:
     with _CLI_SESSIONS_CACHE_LOCK:
         global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
@@ -10071,6 +10077,7 @@ def _cli_sessions_cache_invalidation_stamp() -> int:
 
 
 def _cli_sessions_cache_claim_rebuild(cache_key: tuple) -> tuple[threading.Event, bool]:
+    cache_key = _cli_sessions_rebuild_identity(cache_key)
     with _CLI_SESSIONS_CACHE_LOCK:
         current = _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key)
         if current is not None:
@@ -10081,6 +10088,7 @@ def _cli_sessions_cache_claim_rebuild(cache_key: tuple) -> tuple[threading.Event
 
 
 def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) -> None:
+    cache_key = _cli_sessions_rebuild_identity(cache_key)
     with _CLI_SESSIONS_CACHE_LOCK:
         if event is None:
             return
@@ -10088,6 +10096,15 @@ def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) ->
             _CLI_SESSIONS_CACHE_INFLIGHT.pop(cache_key, None)
     if event is not None:
         event.set()
+
+
+def _cli_sessions_rebuild_identity(key):
+    """One producer per scope, even while DB/index/file revisions advance."""
+    if key and key[0] == 'all_profiles' and len(key) >= 8:
+        return (*key[:3], key[4], key[5], *key[8:])
+    if len(key) >= 9:
+        return (*key[:4], key[5], key[6], *key[9:])
+    return _cli_sessions_stable_cache_identity(key)
 
 
 def _cli_sessions_stable_cache_identity(cache_key: tuple) -> tuple:
@@ -10104,11 +10121,13 @@ def _cli_sessions_stable_cache_identity(cache_key: tuple) -> tuple:
 
 
 
-def _copy_last_known_good_cli_sessions(stable_key: tuple, invalidation_stamp: int):
+def _copy_last_known_good_cli_sessions(stable_key: tuple, invalidation_stamp: int, cache_key=None):
     with _CLI_SESSIONS_CACHE_LOCK:
         entry = _CLI_SESSIONS_LAST_KNOWN_GOOD.get(stable_key)
         if entry is None or entry[0] != invalidation_stamp:
             return None
+        if cache_key is not None and (len(entry) < 3 or entry[2] != cache_key):
+            return None  # A different revision may have deleted or hidden rows.
         _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(stable_key)
         return _copy_cli_sessions(entry[1])
 
@@ -10132,6 +10151,7 @@ def _cache_cli_sessions_if_current(
         _CLI_SESSIONS_LAST_KNOWN_GOOD[stable_key] = (
             invalidation_stamp,
             _copy_cli_sessions(copied_sessions),
+            cache_key,
         )
         _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(stable_key)
         while len(_CLI_SESSIONS_LAST_KNOWN_GOOD) > _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES:
@@ -10179,6 +10199,7 @@ def _load_and_cache_cli_sessions(
     stale_stamp,
     all_profiles: bool,
     db_path,
+    require_complete: bool = False,
 ) -> list:
     stable_cache_key = _cli_sessions_stable_cache_identity(cache_key)
     try:
@@ -10197,33 +10218,26 @@ def _load_and_cache_cli_sessions(
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
         stable_sessions = _copy_last_known_good_cli_sessions(
-            stable_cache_key, invalidation_stamp
+            stable_cache_key, invalidation_stamp, cache_key if require_complete else None
         )
         if stable_sessions is not None:
             return stable_sessions
-        return []
+        if not require_complete:
+            return []  # Legacy additive readers never publish this as a cache hit.
+        raise SessionInventoryUnavailable("Session inventory could not be read; retry shortly") from _cli_err
     if not complete:
-        if isinstance(loaded, _CliSessionsLoadResult) and loaded.fresh_when_incomplete:
-            # Optional source passes are additive. If one cannot be read, the
-            # primary rows already loaded are newer and more useful than a stale
-            # complete snapshot. Serve them for this request only; never publish
-            # an incomplete projection to either cache.
+        if not require_complete and isinstance(loaded, _CliSessionsLoadResult) and loaded.fresh_when_incomplete:
             return _copy_cli_sessions(sessions)
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
-        stable_sessions = _copy_last_known_good_cli_sessions(
-            stable_cache_key, invalidation_stamp
-        )
+        stable_sessions = _copy_last_known_good_cli_sessions(stable_cache_key, invalidation_stamp, cache_key if require_complete else None)
         if stable_sessions is not None:
             return stable_sessions
-        # Expose a first partial attempt, but never publish it as authoritative.
-        return _copy_cli_sessions(sessions)
-    _cache_cli_sessions_if_current(
-        cache_key,
-        ttl,
-        invalidation_stamp,
-        sessions,
-    )
+        if not require_complete:
+            return _copy_cli_sessions(sessions)
+        raise SessionInventoryUnavailable("Session inventory is incomplete; retry shortly")
+    if not _cache_cli_sessions_if_current(cache_key, ttl, invalidation_stamp, sessions):
+        raise SessionInventoryUnavailable("Session inventory changed during loading; retry shortly")
     return _copy_cli_sessions(sessions)
 
 
@@ -10236,6 +10250,7 @@ def _reload_cli_sessions_after_inflight(
     load_sessions,
     all_profiles: bool,
     db_path: str,
+    require_complete: bool = False,
 ) -> list:
     while True:
         event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
@@ -10257,18 +10272,10 @@ def _reload_cli_sessions_after_inflight(
             return cached_sessions
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
-        if not wait_finished:
-            fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
-            return _load_and_cache_cli_sessions(
-                cache_key=cache_key,
-                ttl=ttl,
-                invalidation_stamp=fallback_invalidation_stamp,
-                load_sessions=load_sessions,
-                stale_sessions=stale_sessions,
-                stale_stamp=stale_stamp,
-                all_profiles=all_profiles,
-                db_path=db_path,
-            )
+        # A request deadline is not evidence that the current owner died.
+        if not wait_finished or require_complete:
+            raise SessionInventoryUnavailable("Session inventory is loading; retry shortly")
+        # The owner has completed. One bounded follow-up may now claim work.
     try:
         invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
         return _load_and_cache_cli_sessions(
@@ -10280,6 +10287,7 @@ def _reload_cli_sessions_after_inflight(
             stale_stamp=stale_stamp,
             all_profiles=all_profiles,
             db_path=db_path,
+            require_complete=require_complete,
         )
     finally:
         _cli_sessions_cache_done(cache_key, event)
@@ -10313,7 +10321,7 @@ def _cli_sessions_cache_ttl_seconds() -> float:
 # ``/api/git-info``) must not pay that. The fast path is a *probe* of the
 # producer's own cache: it answers only when the snapshot it finds is exactly
 # what a current enumeration would return, and returns ``{}`` otherwise so the
-# caller falls back to ``get_cli_sessions()``. It never enumerates itself, and
+# caller performs a bounded exact-ID read. It never enumerates itself, and
 # it never answers from a snapshot it cannot vouch for.
 #
 # "Vouched for" means the snapshot was taken at the *current* state.db
@@ -10419,7 +10427,7 @@ def lookup_cli_session_row(
 
     Answers only when the cached snapshot is provably what a current
     enumeration would return; otherwise returns ``{}`` so the caller falls
-    back to ``get_cli_sessions()``. Returns a defensive copy.
+    back to an exact-ID read. Returns a defensive copy.
     """
     if not session_id:
         return {}
@@ -10980,6 +10988,19 @@ def _load_cli_sessions_uncached(
         _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
     except Exception:
         _deleted_webui_tombstone = frozenset()
+    if session_ids is not None and not session_ids:
+        return _result()
+    # Exact IDs select their actual source, including excluded background rows.
+    # The projection has no recovery/history passes in this mode.
+    if session_ids is not None and source_filter is None:
+        from api.agent_sessions import open_state_db_readonly
+        with closing(open_state_db_readonly(db_path)) as conn:
+            sources = conn.execute(
+                "SELECT DISTINCT source FROM sessions WHERE id IN (%s)" %
+                ",".join("?" for _ in session_ids), session_ids).fetchall()
+        if len(sources) != 1:
+            return _result()
+        source_filter = sources[0][0]
     state_rows = read_importable_agent_session_rows(
         db_path,
         limit=visible_session_limit if visible_session_limit is not None else (
@@ -11000,7 +11021,7 @@ def _load_cli_sessions_uncached(
         include_sources=None if source_filter is None else (source_filter,),
         **({'session_ids': session_ids} if session_ids is not None else {}),
     )
-    if source_filter is None:
+    if source_filter is None and session_ids is None:
         # The interactive window above is a MIXED budget of assigned and
         # unassigned conversations, and it truncates by recency. Two bounded
         # recovery passes repair the two ways that loses a conversation:
@@ -11847,7 +11868,7 @@ def _load_cli_sessions_uncached(
 
 def get_cli_session_by_id(
     session_id: str,
-    source_filter: str,
+    source_filter: str | None = None,
     *,
     all_profiles: bool = False,
 ) -> dict:
@@ -11862,7 +11883,7 @@ def get_cli_session_by_id(
     """
     sid = str(session_id or '').strip()
     source = _normalize_cli_session_source_filter(source_filter)
-    if not sid or not source:
+    if not sid:
         return {}
     if all_profiles:
         contexts, _cache_key = _all_profiles_cli_contexts()
@@ -11870,21 +11891,20 @@ def get_cli_session_by_id(
         hermes_home, db_path, cli_profile, _cache_key = _resolve_cli_sessions_context(source)
         contexts = [(hermes_home, db_path, cli_profile)]
     for ctx_home, ctx_db_path, ctx_profile in contexts:
-        try:
-            rows = _load_cli_sessions_uncached(
-                ctx_home,
-                ctx_db_path,
-                ctx_profile,
-                source_filter=source,
-                include_claude_code=False,
-                session_ids=(sid,),
-            )
-        except (OSError, sqlite3.Error):
-            logger.debug("Explicit CLI session lookup skipped profile %s", ctx_profile, exc_info=True)
-            continue
+        rows = _load_cli_sessions_uncached(
+            ctx_home, ctx_db_path, ctx_profile,
+            source_filter=source, include_claude_code=False,
+            session_ids=(sid,), project_assigned_limit=False,
+            cron_project_limit=False, webhook_project_limit=False,
+            kanban_project_limit=False,
+        )
+        # Preserve the existing authorized context order (active profile first).
+        # Stop at the first exact match instead of probing unrelated homes.
         for row in rows:
             if row.get('session_id') == sid:
                 return row
+    if source in (None, CLAUDE_CODE_SOURCE):
+        return next(iter(get_claude_code_sessions(session_id=sid)), {})
     return {}
 
 
@@ -11893,12 +11913,16 @@ def get_cli_sessions(
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
+    discovery_intent: str = "all",
+    require_complete: bool = False,
+    force_refresh: bool = False,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
-    Returns empty list if the SQLite DB is missing or any error occurs -- the
-    bridge is purely additive and never crashes the WebUI.
+    Legacy additive callers may receive uncached partial rows on read failure.
+    Shared inventories use require_complete=True: incomplete/failed cold reads
+    raise SessionInventoryUnavailable, never a successful empty snapshot.
     """
     source_filter = _normalize_cli_session_source_filter(source_filter)
     contexts = []
@@ -11921,6 +11945,40 @@ def get_cli_sessions(
         )
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
+    if discovery_intent not in ("all", "interactive", "cron", "webhook", "kanban"):
+        raise ValueError("Invalid session discovery intent")
+    if require_complete:
+        # The warm coordinator detects external deletes/edits even during a
+        # stream. Its complete refresh must not hit a streaming-frozen snapshot
+        # whose database revision predates that detected change.
+        if all_profiles:
+            cache_key = (*cache_key[:3], context_cache_key, *cache_key[4:])
+        elif len(cache_key) >= 5:
+            cache_key = (*cache_key[:4], _sqlite_file_stat_cache_key(db_path), *cache_key[5:])
+        cache_key = cache_key + ("complete_inventory",)
+    if discovery_intent != "all":
+        cache_key = cache_key + (discovery_intent,)
+
+    def _intent_kwargs():
+        if discovery_intent == "all":
+            return {}
+        return {
+            f"{source}_project_limit": (
+                (None if all_profiles else {"cron": CRON_PROJECT_CHIP_LIMIT,
+                 "webhook": WEBHOOK_PROJECT_CHIP_LIMIT, "kanban": KANBAN_PROJECT_CHIP_LIMIT}[source])
+                if discovery_intent == source else False)
+            for source in ("cron", "webhook", "kanban")
+        }
+
+    if force_refresh:
+        # A shared reconciliation observed an input change (including a
+        # sidecar edit the SQL revision cannot see). Invalidate this derived
+        # projection, while retaining the common route snapshot if eligible.
+        with _CLI_SESSIONS_CACHE_LOCK:
+            if _cli_sessions_rebuild_identity(cache_key) in _CLI_SESSIONS_CACHE_INFLIGHT:
+                raise SessionInventoryUnavailable("Session inventory is loading; retry shortly")
+            _CLI_SESSIONS_CACHE.pop(cache_key, None)
+            _CLI_SESSIONS_LAST_KNOWN_GOOD.pop(_cli_sessions_stable_cache_identity(cache_key), None)
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
@@ -11953,6 +12011,7 @@ def get_cli_sessions(
                     'webhook_project_limit': None,
                     'kanban_project_limit': None,
                 }
+                load_kwargs.update(_intent_kwargs())
                 if loader_supports_include_claude_code:
                     # Claude Code is global rather than profile-owned. Scan it
                     # once below so profile 0 availability cannot suppress it.
@@ -12010,6 +12069,7 @@ def get_cli_sessions(
                 ),
             )
         load_kwargs: dict = {'source_filter': source_filter}
+        load_kwargs.update(_intent_kwargs())
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
         if loader_supports_completeness:
@@ -12042,6 +12102,30 @@ def get_cli_sessions(
                     stale_sessions = _copy_cli_sessions(cached_sessions)
                     stale_stamp = cached_stamp
         event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        if is_owner and stale_sessions is not None and require_complete:
+            from api.profiles import get_active_profile_name, set_request_profile, clear_request_profile
+            owner_profile = get_active_profile_name() or 'default'
+            invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
+            def refresh_expired():
+                try:
+                    set_request_profile(owner_profile)
+                    _load_and_cache_cli_sessions(
+                        cache_key=cache_key, ttl=ttl, invalidation_stamp=invalidation_stamp,
+                        load_sessions=_load_sessions, stale_sessions=stale_sessions,
+                        stale_stamp=stale_stamp, all_profiles=all_profiles, db_path=db_path,
+                        require_complete=True,
+                    )
+                except Exception:
+                    logger.debug("CLI inventory background refresh failed", exc_info=True)
+                finally:
+                    clear_request_profile()
+                    _cli_sessions_cache_done(cache_key, event)
+            try:
+                threading.Thread(target=refresh_expired, name="cli-session-cache-rebuild", daemon=True).start()
+            except Exception:
+                _cli_sessions_cache_done(cache_key, event)
+                raise
+            return stale_sessions
         if is_owner:
             try:
                 invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
@@ -12054,6 +12138,7 @@ def get_cli_sessions(
                     stale_stamp=stale_stamp,
                     all_profiles=all_profiles,
                     db_path=db_path,
+                    require_complete=require_complete,
                 )
             finally:
                 _cli_sessions_cache_done(cache_key, event)
@@ -12065,16 +12150,21 @@ def get_cli_sessions(
             load_sessions=_load_sessions,
             all_profiles=all_profiles,
             db_path=db_path,
+            require_complete=require_complete,
         )
 
     try:
         loaded = _load_sessions()
+        if require_complete and isinstance(loaded, _CliSessionsLoadResult) and not loaded.complete:
+            raise SessionInventoryUnavailable("Session inventory is incomplete; retry shortly")
         return loaded.sessions if isinstance(loaded, _CliSessionsLoadResult) else loaded
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
             "all profiles" if all_profiles else db_path, _cli_err,
         )
+        if require_complete:
+            raise SessionInventoryUnavailable("Session inventory could not be read; retry shortly") from _cli_err
         return []
 
 def _json_loads_if_string(value):
