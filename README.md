@@ -564,10 +564,14 @@ The server binds to `127.0.0.1` by default. To reach it from another machine,
 use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh`
 prints for you over SSH) or, on a single-operator or access-restricted tailnet,
 use the preferred [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)
-flow, which keeps WebUI on loopback behind tailnet-only HTTPS. Direct access to
-`http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` and
-`HERMES_WEBUI_PASSWORD` is a fallback when Serve is unavailable. Full setup and
-the community ARM64-Android field report: [`docs/remote-access.md`](docs/remote-access.md).
+flow, which keeps WebUI on loopback behind tailnet-only HTTPS. For public access,
+Tailscale Funnel or Serve should proxy `http://127.0.0.1:8787`; Tailscale
+terminates HTTPS. Do not keep repo-local `server.crt` or `server.key` files for
+this deployment: they force direct HTTPS and break the HTTP origin assumed by the
+proxy. Direct access to `http://<server-tailscale-ip>:8787` with
+`HERMES_WEBUI_HOST=0.0.0.0` and `HERMES_WEBUI_PASSWORD` is only a fallback when
+Serve is unavailable. Full setup and the community ARM64-Android field report:
+[`docs/remote-access.md`](docs/remote-access.md).
 
 ### Manual launch (without start.sh)
 

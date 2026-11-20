@@ -144,6 +144,9 @@ export HERMES_WEBUI_AGENT_DIR="${HERMES_WEBUI_AGENT_DIR:-$HOME/.hermes/hermes-ag
 export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HOME/.hermes/webui}"
 export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
 export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
+# Keep this wrapper out of Hermes runtime selection. A package-managed Agent
+# re-execs into its current managed Python and selects the matching dependency
+# generation; disabling that handoff leaves WebUI on the obsolete 3.11 venv.
 export HERMES_WEBUI_TLS_INSECURE_PROBE="${HERMES_WEBUI_TLS_INSECURE_PROBE:-1}"
 # The GUI restart control is opt-in and uses launchd, the sole process owner.
 export HERMES_WEBUI_RESTART_COMMAND="${HERMES_WEBUI_RESTART_COMMAND:-$PROJECT_DIR/scripts/macos_launchd_control.sh restart}"
@@ -165,9 +168,11 @@ else
   err "zsh workspace sync failed; continuing with the existing workspace list."
 fi
 
-log "Starting Tailscale Funnel -> https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}"
-if ! tailscale funnel --bg --yes "https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}" >> "$LOG_FILE" 2>> "$ERR_FILE"; then
-  err "Tailscale Funnel start command failed; continuing to start WebUI."
+# Non-tailnet clients use this HTTPS endpoint too. Serve would silently
+# remove Funnel access on every restart; preserve the public, authenticated route.
+log "Starting Tailscale Funnel on :8443 -> http://127.0.0.1:${HERMES_WEBUI_PORT}"
+if ! tailscale funnel --bg --yes --https=8443 "http://127.0.0.1:${HERMES_WEBUI_PORT}" >> "$LOG_FILE" 2>> "$ERR_FILE"; then
+  err "Tailscale Funnel setup for WebUI failed; continuing to start WebUI."
 fi
 
 log "Starting Hermes WebUI on ${HERMES_WEBUI_HOST}:${HERMES_WEBUI_PORT}"

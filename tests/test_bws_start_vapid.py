@@ -10,6 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "bws_start.sh"
 
 
+def test_launcher_leaves_managed_agent_runtime_selection_enabled():
+    """The BWS/Tailscale wrapper must not pin WebUI to the pre-PM venv."""
+    source = LAUNCHER.read_text(encoding="utf-8")
+    assert "HERMES_DISABLE_LAZY_INSTALLS=" not in source
+    assert "HERMES_WEBUI_PYTHON=" not in source
+
+
 def test_launcher_dry_run_starts_without_optional_vapid_secret_ids(tmp_path):
     """A missing optional push configuration must not make WebUI unavailable."""
     env = os.environ.copy()

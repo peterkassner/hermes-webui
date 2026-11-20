@@ -1,3 +1,5 @@
+/* Hide the redundant application title bar and let the main layout fill its space. */
+html body .app-titlebar{display:none!important;}
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   /* ── Light mode (default) — warm gold-tinted palette from Hermes brand ── */
   :root {
@@ -14,7 +16,7 @@
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
     --message-body-font-size:14px;--message-body-line-height:1.75;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
     --file-tree-toggle-width:10px;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Inter Tight",Inter,"Segoe UI",system-ui,sans-serif;
+    --font-ui:"Inter Tight",Inter,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14px;line-height:1.6;
@@ -141,8 +143,8 @@
     --user-bubble-bg:#EFEFEF;--user-bubble-border:#DEDEDE;--user-bubble-text:#242424;--user-bubble-placeholder:#707070;
     --user-selection-bg:rgba(0,0,0,0.16);--user-selection-text:#111111;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    --font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-    font-family:var(--font-ui);
+    --font-mono:"CommitMono","Commit Mono",ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --font-family:var(--font-ui);
   }
   :root.dark[data-skin="graphite"]{
     color-scheme:dark;
@@ -268,7 +270,7 @@
     --user-bubble-bg:#EBEBEB;--user-bubble-border:#D9D9D9;--user-bubble-text:#252523;--user-bubble-placeholder:#6A6A68;
     --user-selection-bg:rgba(46,122,96,0.20);--user-selection-text:#0D0D0D;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    --font-mono:ui-monospace,"SFMono-Regular","SF Mono","CommitMono","Commit Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --font-mono:"CommitMono","Commit Mono",ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
     font-family:var(--font-ui);
   }
   :root.dark[data-skin="codex"]{
@@ -394,9 +396,9 @@
     --error:#C15F3C;--success:#6EA100;--warning:#B87916;--info:#6396D6;
     --user-bubble-bg:#F0EEE6;--user-bubble-border:#E2DED2;--user-bubble-text:#30302E;--user-bubble-placeholder:#87867F;
     --user-selection-bg:rgba(217,119,87,0.24);--user-selection-text:#141413;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    --font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-    font-family:var(--font-ui);
+    --font-ui:"Inter Tight",Inter,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    --font-mono:"CommitMono","Commit Mono",ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --font-family:var(--font-ui);
   }
   :root.dark[data-skin="terracotta"]{
     color-scheme:dark;
@@ -521,9 +523,9 @@
     --error:#D1242F;--success:#1A7F37;--warning:#9A6700;--info:#0969DA;
     --user-bubble-bg:#EFEFEF;--user-bubble-border:#DEDEDE;--user-bubble-text:#242424;--user-bubble-placeholder:#707070;
     --user-selection-bg:rgba(0,0,0,0.16);--user-selection-text:#111111;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    --font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-    font-family:var(--font-ui);
+    --font-ui:"Inter Tight",Inter,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    --font-mono:"CommitMono","Commit Mono",ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --font-family:var(--font-ui);
   }
   :root.dark[data-skin="github"]{
     color-scheme:dark;
@@ -1359,7 +1361,7 @@
   :root:not(.dark) ::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);}
   :root:not(.dark) ::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.3);}
   :root:not(.dark) ::selection{background:var(--accent-bg-strong);}
-  :root:not(.dark) *{scrollbar-color:rgba(0,0,0,.15) transparent;}
+  :root:not(.dark) *{scrollbar-color:rgba(0,0,0,0) transparent;}
   /* ── Light mode: sidebar, roles, chips, active states ── */
   :root:not(.dark) .session-item{color:var(--muted);}
   :root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}
@@ -1653,6 +1655,9 @@
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}
+  /* Session names are native buttons; keep their accessible activation without browser button chrome. */
+  .session-title.session-open-control{appearance:none;-webkit-appearance:none;background:transparent;border:0;border-radius:0;padding:0;font:inherit;text-align:left;cursor:pointer;}
+  .session-title.session-open-control:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px;}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -2565,7 +2570,7 @@
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
   .empty-state p{font-size:14px;text-align:center;max-width:320px;}
   .suggestion-grid{display:flex;flex-direction:column;gap:8px;margin-top:12px;width:100%;max-width:380px;}
-  .suggestion{padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
+  .suggestion{font-family:inherit;padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
   .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px max(16px,env(safe-area-inset-bottom,0));background:var(--bg);flex-shrink:0;}
@@ -7273,4 +7278,4 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 .session-id-chip:hover,.session-id-chip:focus-visible{
   border-color:var(--accent);color:var(--text);background:var(--accent-bg);
 }
-.session-id-chip:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px;}
+.session-id-chip:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px;}}
