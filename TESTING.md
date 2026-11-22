@@ -12,7 +12,7 @@ export HERMES_CONFIG_PATH="$trial_root/home/config.yaml"
 export HERMES_WEBUI_STATE_DIR="$trial_root/webui"
 export HERMES_WEBUI_TEST_STATE_DIR="$trial_root/tests"
 mkdir -p "$HERMES_HOME" "$HERMES_BASE_HOME" "$HERMES_WEBUI_STATE_DIR"
-./scripts/test.sh -q tests/test_warm_session_inventory.py tests/test_warm_inventory_client.py tests/test_session_sidebar_cache.py tests/test_issue4842_cli_cache_streaming.py tests/test_cli_sessions_cache_fingerprint.py tests/test_session_list_cache_bounded.py tests/test_streaming_cache_ttl_vs_poll.py tests/test_cli_session_metadata_fastpath.py tests/test_cli_session_metadata_fastpath_integration.py tests/test_gateway_watcher_idle_park.py tests/test_gateway_watcher_profile.py tests/test_gateway_watcher_resubscribe_fresh.py tests/test_issue5501_session_list_retry_affordance.py tests/test_issue3019_cron_project_sessions.py tests/test_webhook_project_sessions.py tests/test_project_assigned_cli_session_limit.py tests/test_pr7555_cli_session_availability.py
+./scripts/test.sh -q tests/test_warm_cache_activity.py tests/test_warm_session_inventory.py tests/test_warm_inventory_client.py tests/test_session_sidebar_cache.py tests/test_issue4842_cli_cache_streaming.py tests/test_cli_sessions_cache_fingerprint.py tests/test_session_list_cache_bounded.py tests/test_streaming_cache_ttl_vs_poll.py tests/test_cli_session_metadata_fastpath.py tests/test_cli_session_metadata_fastpath_integration.py tests/test_gateway_watcher_idle_park.py tests/test_gateway_watcher_profile.py tests/test_gateway_watcher_resubscribe_fresh.py tests/test_issue5501_session_list_retry_affordance.py tests/test_issue3019_cron_project_sessions.py tests/test_webhook_project_sessions.py tests/test_project_assigned_cli_session_limit.py tests/test_pr7555_cli_session_availability.py
 ```
 
 `tests/browser_warm_session_inventory.py` starts its own localhost server with
@@ -43,6 +43,26 @@ Compare cold/preparation behavior separately from already-warm timings; mocks an
 small synthetic histories do not reproduce a large production database or prove
 public-ingress/iPad performance. Do not restart production or flush live caches to
 manufacture cold results.
+
+### Active-chat sidebar availability
+
+Run the same activity probe sequentially against the pre-correction checkpoint
+and the working tree. Each invocation starts separate disposable servers for
+external WAL writes and writes while a fixture-owned stream/run is registered.
+
+```sh
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --revision 3b9f7be39 --activity --fail-one-refresh --output "$trial_root/activity-before"
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --activity --fail-one-refresh --output "$trial_root/activity-after"
+```
+
+Each mode starts with a warm list, commits a message and title roughly every
+100 ms for two minutes, and polls every 250 ms in each of four authenticated
+Chromium contexts. The fixture delays one projection by two seconds and fails
+another. Each mode writes `activity.json` before applying its acceptance checks.
+The checkpoint is expected to exit nonzero. Inspect individual client responses,
+rendered titles, skipped polls, successful publications, WAL size and server
+peak RSS. An eligible list must survive both faults and advance while writes
+continue. The last committed title must converge after writing stops.
 
 ## User-bounded legacy tool anchors (#8427)
 

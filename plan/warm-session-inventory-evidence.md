@@ -171,3 +171,10 @@ only against disposable state.
 3. Verify origin/public-ingress behavior and physical devices after deployment,
    recording cold preparation separately from warm reads without flushing live
    state or weakening the correctness checks.
+
+
+## November 20 activity follow-up
+
+The earlier browser timings cover idle warm reads. Later live monitoring recorded
+11 sidebar 503s in approximately 322 seconds. The [active-write correction and
+validation](cache-availability-webui-evidence.md) covers this separate workload.

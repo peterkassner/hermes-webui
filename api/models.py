@@ -44,6 +44,9 @@ from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
     normalize_agent_session_source,
+    inventory_connection,
+    building_inventory,
+    inventory_sidecars,
     open_state_db_readonly,
     read_assigned_project_row_counts,
     read_importable_agent_session_rows,
@@ -2405,6 +2408,7 @@ class Session:
             raise
         # The value this save actually wrote, not one set on the live object
         # after the payload was built.
+        self._has_persisted_sidecar = True
         self._reasoning_effort_saved = written_reasoning_effort
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
@@ -2497,6 +2501,7 @@ class Session:
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+        session._has_persisted_sidecar = True
         return session
 
     @classmethod
@@ -7969,6 +7974,16 @@ def _stale_snapshot_metadata_refresh_ids(sessions: list[dict]) -> set[str]:
     return refresh_ids
 
 
+def sidebar_file_projection_digest(row):
+    """Compare source-owned fields before applying SQL and runtime overlays."""
+    values = (row.get('profile') or 'default', row.get('title') or 'Untitled',
+            bool(row.get('archived')), bool(row.get('pinned')), row.get('project_id'),
+            row.get('source_tag'), row.get('raw_source'), row.get('session_source'),
+            bool(row.get('read_only')), row.get('parent_session_id'),
+            bool(row.get('pre_compression_snapshot')))
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).digest()
+
+
 def _refresh_index_rows_from_sidecar_metadata(
     sessions: list[dict],
     *,
@@ -7983,7 +7998,20 @@ def _refresh_index_rows_from_sidecar_metadata(
     """
     out: list[dict] = []
     stale_snapshot_ids = _stale_snapshot_metadata_refresh_ids(sessions)
+    manifest = inventory_sidecars()
     for session in sessions:
+        sid = session.get('session_id')
+        if manifest is not None and sid in manifest:
+            signature = manifest[sid].projection
+            if signature is None or signature != sidebar_file_projection_digest(session):
+                # An external edit may leave both the index and an in-process
+                # Session object stale. Load the authoritative row before any
+                # visibility or source selection. Never carry an old owner over.
+                current = Session.load(sid) if signature is None else Session.load_metadata_only(
+                    sid, index_message_counts=index_message_counts)
+                if current is None:
+                    raise SessionInventoryUnavailable("Session sidecar unavailable")
+                session = current.compact(sidebar_metadata_only=True)
         if not _row_may_need_sidecar_metadata_refresh(
             session,
             stale_snapshot_ids=stale_snapshot_ids,
@@ -8543,7 +8571,7 @@ def _read_state_db_sidebar_overrides(
     chunk_size = 500
     overrides: dict[str, dict] = {}
     try:
-        with closing(open_state_db_readonly(db_path)) as conn:
+        with inventory_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -8697,7 +8725,7 @@ def _read_state_db_sidebar_overrides(
         if not missing_source_ids:
             return overrides
         try:
-            with closing(open_state_db_readonly(db_path)) as conn:
+            with inventory_connection(db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 for i in range(0, len(missing_source_ids), chunk_size):
@@ -9150,6 +9178,14 @@ def all_sessions(
 ):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
+    manifest = inventory_sidecars()
+
+    def include_resident(session):
+        if manifest is None or session.session_id in manifest:
+            return True
+        return not (getattr(session, '_has_persisted_sidecar', False)
+                    or getattr(session, '_loaded_metadata_only', False))
+
     # Phase C: try index first for O(1) read; fall back to full scan
     _diag_stage(diag, "all_sessions.index_exists")
     if not SESSION_INDEX_FILE.exists():
@@ -9161,7 +9197,7 @@ def all_sessions(
             index = json.loads(SESSION_INDEX_FILE.read_bytes())
             _diag_stage(diag, "all_sessions.prune_index")
             with LOCK:
-                in_memory_ids = set(SESSIONS.keys())
+                in_memory_ids = {sid for sid, item in SESSIONS.items() if include_resident(item)}
             persisted_ids = _persisted_session_ids_snapshot()
             if not index and _session_dir_has_persisted_session_files():
                 raise ValueError("empty session index while session files exist")
@@ -9206,6 +9242,8 @@ def all_sessions(
             index_map = {s['session_id']: s for s in index}
             with LOCK:
                 for s in SESSIONS.values():
+                    if not include_resident(s):
+                        continue
                     index_map[s.session_id] = s.compact(
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
@@ -9326,8 +9364,11 @@ def all_sessions(
         except Exception:
             logger.debug("Failed to load session from %s", p)
     _diag_stage(diag, "all_sessions.full_scan_overlay")
-    for s in SESSIONS.values():
-        if all(s.session_id != x.session_id for x in out): out.append(s)
+    with LOCK:
+        resident = list(SESSIONS.values())
+    for s in resident:
+        if include_resident(s) and all(s.session_id != x.session_id for x in out):
+            out.append(s)
     _diag_stage(diag, "all_sessions.full_scan_sort_filter")
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
@@ -11994,6 +12035,7 @@ def get_cli_sessions(
             unavailable_error = None
             successful_profiles = 0
             optional_incomplete = False
+            partial_profile = False
             for ctx_home, ctx_db_path, ctx_profile in contexts:
                 load_kwargs = {
                     # NOTE: visible_session_limit=None is NOT "unbounded" for the
@@ -12027,6 +12069,7 @@ def get_cli_sessions(
                     )
                     if isinstance(profile_loaded, _CliSessionsLoadResult):
                         profile_rows = profile_loaded.sessions
+                        partial_profile |= not profile_loaded.complete
                         optional_incomplete = optional_incomplete or (
                             not profile_loaded.complete
                             and profile_loaded.fresh_when_incomplete
@@ -12059,7 +12102,7 @@ def get_cli_sessions(
                     unavailable_error is None
                     and successful_profiles == len(contexts)
                     and external_complete
-                    and not optional_incomplete
+                    and not partial_profile
                 ),
                 fresh_when_incomplete=(
                     optional_incomplete
@@ -12080,6 +12123,23 @@ def get_cli_sessions(
             cli_profile,
             **load_kwargs,
         )
+
+    if force_refresh and require_complete and building_inventory():
+        # The outer builder owns the read transaction and the publication fence.
+        # Claim the ordinary CLI producer slot, but never publish this candidate
+        # independently or substitute an earlier CLI result after a read failure.
+        event, owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        if not owner:
+            raise SessionInventoryUnavailable("Session inventory is loading; retry shortly")
+        try:
+            result = _load_sessions()
+            if isinstance(result, _CliSessionsLoadResult):
+                if not result.complete:
+                    raise SessionInventoryUnavailable("Session inventory is incomplete; retry shortly")
+                return result.sessions
+            return result
+        finally:
+            _cli_sessions_cache_done(cache_key, event)
 
     if ttl > 0:
         stale_sessions = None

@@ -235,22 +235,26 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
         )
 
 
-def _on_session_list_changed(profile: str | None = None) -> None:
-    """Invalidate in-process /api/sessions cache when sidebar state mutates."""
-    _clear_session_list_cache(profile)
-    # #4842: also drop the inner CLI/cron projection cache. While a turn streams
-    # that cache is frozen on a stable streaming marker (so per-token message
-    # writes don't bust it), which means it no longer self-invalidates via the
-    # state.db content fingerprint mid-stream. In-app structural mutations
-    # (session create/rename/archive/delete/branch/pin/move/import, attention)
-    # fire this listener — and never fire per streamed token — so clearing here
-    # restores prompt freshness for those without reintroducing the per-poll
-    # rebuild the freeze removed. Note: externally-driven changes that do NOT go
-    # through this listener (a scheduled cron job completing, or an external CLI
-    # writing rows directly) are not cleared here mid-stream; for those the 30s
-    # streaming TTL is the backstop — they surface within one streaming-TTL
-    # window (≤30s) rather than instantly. That bound is the deliberate
-    # latency/CPU trade-off of the freeze.
+def _on_session_list_changed(profile=None, *, reason=None, session_id=None):
+    """Apply committed changes before notifying sidebar subscribers."""
+    ordinary = reason in {"session_new", "session_duplicate", "session_branch",
+                          "attention_pending", "attention_resolved", "attention_cleared",
+                          "cron_complete"}
+    fields = {"session_rename": "title", "session_title_regenerate": "title",
+              "session_archive": "archived", "session_pin": "pinned",
+              "session_move": "project_id"}
+    field = fields.get(reason)
+    patch = None
+    if field and session_id:
+        with LOCK:
+            session = SESSIONS.get(session_id)
+            if session and _profiles_match(getattr(session, "profile", None), profile):
+                patch = {field: getattr(session, field, None)}
+    if ordinary or (session_id and (patch or (profile and reason == "session_delete"))):
+        _route_session_list_cache.apply_warm_change(profile, session_id, patch,
+                                                    remove=reason == "session_delete")
+    else:
+        _clear_session_list_cache(profile)
     try:
         from api.models import clear_cli_sessions_cache
         clear_cli_sessions_cache()
@@ -259,7 +263,7 @@ def _on_session_list_changed(profile: str | None = None) -> None:
 
 
 try:
-    add_session_list_changed_listener(_on_session_list_changed)
+    add_session_list_changed_listener(_on_session_list_changed, detailed=True)
 except Exception:
     logger.debug("Failed to register session list cache invalidation listener", exc_info=True)
 
@@ -1695,26 +1699,7 @@ def _gateway_session_metadata_path():
     return hermes_home / "sessions" / "sessions.json"
 
 
-def _load_gateway_session_identity_map() -> dict[str, dict]:
-    path = _gateway_session_metadata_path()
-    if not path.exists():
-        return {}
-
-    try:
-        st = path.stat()
-        cache = _MESSAGING_SESSION_METADATA_CACHE
-        with _MESSAGING_SESSION_METADATA_LOCK:
-            if cache["path"] == str(path) and cache["mtime"] == st.st_mtime:
-                return cache["identity"].copy()
-    except Exception:
-        return {}
-
-    try:
-        raw_sessions = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as _json_err:
-        logger.debug("Failed to parse gateway sessions metadata from %s: %s", path, _json_err)
-        return {}
-
+def _gateway_session_identities(raw_sessions):
     mapping: dict[str, dict] = {}
     if isinstance(raw_sessions, dict):
         for _entry in raw_sessions.values():
@@ -1735,9 +1720,34 @@ def _load_gateway_session_identity_map() -> dict[str, dict]:
                 "raw_source": platform,
             }
 
+    return mapping
+
+
+def _load_gateway_session_identity_map() -> dict[str, dict]:
+    path = _gateway_session_metadata_path()
+    if not path.exists():
+        return {}
+
+    try:
+        st = path.stat()
+        version = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        cache = _MESSAGING_SESSION_METADATA_CACHE
+        with _MESSAGING_SESSION_METADATA_LOCK:
+            if cache["path"] == str(path) and cache["mtime"] == version:
+                return cache["identity"].copy()
+    except Exception:
+        return {}
+
+    try:
+        raw_sessions = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as _json_err:
+        logger.debug("Failed to parse gateway sessions metadata from %s: %s", path, _json_err)
+        return {}
+
+    mapping = _gateway_session_identities(raw_sessions)
     with _MESSAGING_SESSION_METADATA_LOCK:
         _MESSAGING_SESSION_METADATA_CACHE["path"] = str(path)
-        _MESSAGING_SESSION_METADATA_CACHE["mtime"] = st.st_mtime
+        _MESSAGING_SESSION_METADATA_CACHE["mtime"] = version
         _MESSAGING_SESSION_METADATA_CACHE["identity"] = mapping
     return mapping.copy()
 
@@ -3466,30 +3476,37 @@ def _get_shared_session_list_payload(*, diag=None, **options):
     key = _shared_inventory_key(metadata_options)
     home = str(Path(get_active_hermes_home()).resolve())
     _route_session_list_cache.admit_warm_scope(key, metadata_options, home)
-    metadata, fresh = _session_list_cache_get(key, allow_stale=True)
-    if metadata is None or not fresh:
+    metadata, _ = _session_list_cache_get(key, allow_stale=True)
+    if metadata is None:
         # Warm readers never enumerate synchronously. Claim before starting the
         # worker so a four-client burst still creates exactly one builder.
         _refresh_shared_inventory(key, metadata_options, background=True)
         with _SESSIONS_CACHE_LOCK:
             pending = _SESSIONS_CACHE_INFLIGHT.get(key)
-        if pending is not None and metadata is None:
+        if pending is not None:
+            with _SESSIONS_CACHE_LOCK:
+                _route_session_list_cache._WARM_COUNTS["cold_waits"] += 1
             pending.wait(_SESSIONS_CACHE_WAIT_SECONDS)
-        metadata, fresh = _session_list_cache_get(key, allow_stale=True)
-    if metadata is None or not fresh:
-        # A changed source may include deletions/visibility revocation: it is not
-        # eligible stale data. Age alone is safe while reconciliation owns it.
-        if metadata is None or _session_list_cache_stale_reason(key) == "source":
-            raise SessionInventoryUnavailable("Session inventory is loading; retry shortly")
+        metadata, _ = _session_list_cache_get(key, allow_stale=True)
+    if metadata is None:
+        raise SessionInventoryUnavailable("Session inventory is loading; retry shortly")
     return _build_session_list_cache_payload(**options, _metadata=metadata, diag=diag)
 
 
 def _refresh_shared_inventory(key, options, *, background=False):
     from api.profiles import set_request_profile, clear_request_profile
-    event, owner = _session_list_cache_claim_rebuild(key)
-    if not owner:
-        return
-    generation = _session_list_cache_invalidation_stamp(key)
+    cache = _route_session_list_cache
+    with _SESSIONS_CACHE_LOCK:
+        scope = cache._WARM_SCOPES.get(key)
+        if scope is None or time.monotonic() < scope.get('retry_after', 0):
+            return
+        if sum("warm_metadata" in k for k in _SESSIONS_CACHE_INFLIGHT) >= cache._WARM_SCOPE_LIMIT:
+            return
+        event, owner = _session_list_cache_claim_rebuild(key)
+        if not owner:
+            return
+        safety, content = scope['safety'], scope['content']
+        previous_fingerprint = scope['fingerprint']
     def build():
         try:
             # Detached metadata work needs profile TLS, never process-env changes.
@@ -3501,23 +3518,40 @@ def _refresh_shared_inventory(key, options, *, background=False):
                     return  # Removed/replaced profile or changed home.
                 if not _route_session_list_cache.warm_scope_is_current(key):
                     return
-                for _attempt in range(3):
-                    if generation != _session_list_cache_invalidation_stamp(key):
-                        return
-                    fingerprint = _route_session_list_cache.warm_scope_fingerprint(key)
-                    source_stamp = _session_list_cache_source_stamp(key)
-                    payload = _build_session_list_cache_payload(**options, include_archived=True, _metadata_only=True)
-                    if (fingerprint == _route_session_list_cache.warm_scope_fingerprint(key)
-                            and source_stamp == _session_list_cache_source_stamp(key)
-                            and _session_list_cache_set(key, payload, expected_invalidation_stamp=generation)):
-                        _route_session_list_cache.mark_warm_scope_refreshed(key, fingerprint)
-                        return
+                from api.agent_sessions import inventory_read_views
+                try:
+                    fingerprint = cache.warm_scope_fingerprint(key, previous_fingerprint)
+                except Exception:
+                    cache.refuse_warm_scope(key, scope)
+                    raise
+                with inventory_read_views(fingerprint.sidecars):
+                    payload = _build_session_list_cache_payload(
+                        **options, include_archived=True, _metadata_only=True)
+                    rows = payload.get('sessions', [])
+                    proofs = cache.warm_database_proofs(key, rows)
+                # Recheck candidate-only IDs from a fresh connection, after releasing
+                # the builder's read view. Ordinary appends never invalidate a read.
+                try:
+                    current = cache.warm_scope_fingerprint(key, fingerprint)
+                    verified = cache.warm_database_proofs(key, rows)
+                except Exception:
+                    cache.refuse_warm_scope(key, scope)
+                    raise
+                if (current.authority != fingerprint.authority
+                        or cache._unsafe_rows(rows, fingerprint, current, proofs, verified)):
+                    cache.warm_scope_needs_refresh(key)
+                    return
+                _session_list_cache_set(key, payload, warm_publication=(
+                    scope, safety, content, fingerprint, proofs))
             finally:
                 if previous is None:
                     clear_request_profile()
                 else:
                     set_request_profile(previous)
         except Exception:
+            with _SESSIONS_CACHE_LOCK:
+                cache._WARM_COUNTS['refresh_failures'] += 1
+                scope['retry_after'] = time.monotonic() + 1
             logger.debug("Warm session inventory refresh failed", exc_info=True)
         finally:
             _session_list_cache_done(key, event)
@@ -3531,13 +3565,13 @@ def _refresh_shared_inventory(key, options, *, background=False):
         build()
 
 
-def _reconcile_warm_session_inventories(*, startup=False):
+def _reconcile_warm_session_inventories(*, startup=False, background=False, stop_event=None):
     """Called by the existing watcher owner, including with zero browsers."""
     from api.profiles import set_request_profile, clear_request_profile, get_hermes_home_for_profile
     if startup:
         options = _interactive_inventory_options()
         key = _shared_inventory_key(options)
-        _route_session_list_cache.admit_warm_scope(key, options, key[-2], startup=True)
+        _route_session_list_cache.admit_warm_scope(key, options, key[-2], startup=True, stop_event=stop_event)
     for key, options, home in _route_session_list_cache.warm_scope_snapshot():
         from api import profiles as profiles_api
         previous = getattr(profiles_api._tls, "profile", None)
@@ -3552,10 +3586,10 @@ def _reconcile_warm_session_inventories(*, startup=False):
                 pinned = _route_session_list_cache.warm_scope_is_startup(key)
                 _route_session_list_cache.retire_warm_scope(key)
                 new_key = _shared_inventory_key(current_options)
-                _route_session_list_cache.admit_warm_scope(new_key, current_options, home, startup=pinned)
+                _route_session_list_cache.admit_warm_scope(new_key, current_options, home, startup=pinned, stop_event=stop_event)
                 options, key = current_options, new_key
             if _route_session_list_cache.warm_scope_needs_refresh(key):
-                _refresh_shared_inventory(key, options)
+                _refresh_shared_inventory(key, options, background=background)
         except Exception:
             logger.debug("Warm scope reconciliation failed", exc_info=True)
         finally:
@@ -20067,7 +20101,7 @@ def handle_post(handler, parsed) -> bool:
         is_messaging_session = _is_messaging_session_id(sid)
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
         try:
-            event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)
+            event_profile = getattr(get_session(sid, metadata_only=True), "profile", None) or "default"
         except KeyError:
             event_profile = None
         except Exception:
@@ -20221,7 +20255,7 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        _publish_session_list_changed("session_delete", profile=event_profile)
+        _publish_session_list_changed("session_delete", profile=event_profile, session_id=sid)
         response = {
             "state_db_cleanup_failed": state_db_cleanup_failed,
             **worktree_retained,

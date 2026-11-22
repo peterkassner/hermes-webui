@@ -443,7 +443,9 @@ class GatewayWatcher:
                     from api.profiles import set_request_profile, clear_request_profile
                     set_request_profile(self.profile_name or "default")
                     try:
-                        _reconcile_warm_session_inventories(startup=not self._warm_initialized)
+                        _reconcile_warm_session_inventories(
+                            startup=not self._warm_initialized, background=True,
+                            stop_event=self._stop_event)
                         self._warm_initialized = True
                     finally:
                         clear_request_profile()

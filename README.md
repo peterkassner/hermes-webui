@@ -12,6 +12,8 @@ shows token usage at a glance. All settings and session tools are in the
 **Hermes Control Center** (launcher at the sidebar bottom).
 
 Session lists are prepared in the background and shared across connected devices.
+During an active chat, the sidebar keeps showing the last eligible list while
+the server prepares newer titles, counts and ordering.
 Cron, webhook and kanban histories load when their corresponding view is opened.
 A server restart has an initial preparation interval; a temporary loading failure
 can be retried without treating it as an empty account. See

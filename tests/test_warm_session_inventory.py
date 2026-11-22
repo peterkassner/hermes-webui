@@ -277,7 +277,8 @@ def test_no_client_watcher_owns_reconciliation_and_stops(monkeypatch, tmp_path):
     entered = threading.Event()
     watcher = gw.GatewayWatcher(profile_name='default', hermes_home=tmp_path)
     watcher.warm_inventory = True
-    def reconcile(*, startup=False):
+    def reconcile(*, startup=False, background=False, stop_event=None):
+        assert background and stop_event is watcher._stop_event
         assert startup
         entered.set()
     monkeypatch.setattr(routes, '_reconcile_warm_session_inventories', reconcile)

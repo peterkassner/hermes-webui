@@ -8,8 +8,8 @@ requested; startup does not scan every profile.
 
 SQLite and session sidecars remain authoritative. The existing route cache holds
 bounded, copy-safe metadata rather than transcripts. Its existing 64-entry bound
-remains in place. Up to eight warm scope records retain options and identity only;
-they do not hold another copy of session rows. The startup scope stays admitted.
+remains in place. Up to eight admitted scopes retain their options, source revisions and compact
+eligibility evidence. The route cache owns the only published list. The startup scope stays admitted.
 Other scopes can become cold after eviction.
 
 ## Identity, filtering and freshness
@@ -20,21 +20,38 @@ hidden-row, pagination and sidebar-tab filters reuse the common prepared metadat
 Lineage metadata for the existing top-N selections is prepared with it. Runtime
 stream/pending/unread-related flags retain their existing response-time overlay.
 
-Age alone does not discard an admitted snapshot: the background checker owns its
-refresh. Unchanged checks inspect file identities and timestamps without projecting
-histories. They include the database/WAL, sidecars, sidebar index, project/settings
-files, profile configuration and applicable profile homes. Inode and ctime checks
-cover replacements and same-size edits. A detected change can remove or hide a
-row, so the old snapshot is withheld while the replacement is prepared. Explicit
-WebUI invalidation fences publication by older work immediately. Refreshing metadata
-continues to use the existing reconciliation/cleanup behavior.
+A warm request immediately uses the last eligible list, including a valid
+empty list. The background checker detects ordinary database/WAL, sidebar
+index and session-file edits while browsers are connected or disconnected.
+Unrelated files atomically replaced in the profile home do not trigger a build.
+Matching clients share one build. A content failure leaves eligible data
+available. A slow build in one profile leaves the watcher free to check another.
 
-Both cache layers allow one rebuild owner per scope. A follower's request deadline
-never authorizes an independent rebuild. Expired eligible metadata can remain
-readable during refresh; a genuinely cold or invalidated scope can return HTTP 503
-with `retryable: true`. The existing client loading-error message and Retry button
-handle that response while retaining previously loaded rows only for a matching
-client scope. Read failure is never cached as a successful empty inventory.
+Each builder captures its input revision and reads the related SQLite projection
+and lineage queries in a read-only transaction per participating database.
+A 30-second read budget limits long-running SQLite work. The file revision is
+a conservative lower bound on the inputs read. SQLite and
+the JSON files have independent versions. After releasing the read transactions,
+the builder checks current ownership and eligibility for the rows it actually
+read, including rows discovered for the first time. Ordinary changes after
+capture leave another refresh due at the next watcher tick.
+
+Known committed sidebar mutations update or remove the affected row in admitted
+inventories and fence older work before notifying subscribers. External safety
+changes are checked on the watcher's five-second cadence. Changes in row
+ownership, visibility or existence retire the affected rows until the next
+complete projection. Unverifiable eligibility, changed access settings and
+replaced stores can withdraw the whole affected list. A missing eligible
+snapshot shares the owner's bounded wait and can return HTTP 503 with
+`retryable: true`. The existing client displays a loading error with Retry.
+Direct opening and mutation continue to use their own authorization checks.
+
+The cache lock protects the final swap, admission identity and safety generation.
+The installed entry records the builder's captured revision. Evicting one
+options key leaves other scopes in the same profile available. Health reads
+report scalar counts of publications, failed builds, safety refusals, cold waits
+and warm reads completed during a rebuild. Sampling these counts performs no
+session discovery.
 
 Older additive model callers retain their uncached-partial-read behavior. Shared
 inventories explicitly request complete results; this policy is part of the cache
@@ -79,6 +96,7 @@ schema, model catalog, deployment configuration or virtual-keyboard behavior is
 changed.
 
 See [verification instructions](../../TESTING.md#shared-warm-session-inventory) and
-[local implementation evidence](../../plan/warm-session-inventory-evidence.md).
+[original implementation evidence](../../plan/warm-session-inventory-evidence.md)
+and [active-write results](../../plan/cache-availability-webui-evidence.md).
 Local fixture results do not establish public-ingress latency or physical-device
 behavior. Deployment/restart remains a separate operator action.

@@ -15,6 +15,8 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+import threading
+import sys
 import time
 import urllib.request
 
@@ -42,12 +44,67 @@ def wrap(obj, name, label):
 wrap(models, '_load_cli_sessions_uncached', 'cli_builds')
 wrap(models, 'read_importable_agent_session_rows', 'reader')
 wrap(gateway_watcher, 'read_importable_agent_session_rows', 'watcher_reader')
+# Activity faults live exclusively in this disposable server process.
+import os, time
+from pathlib import Path
+from api import config, route_session_list_cache
+armed = Path(os.environ["HERMES_HOME"]) / "activity-start"
+from api import agent_sessions
+from contextlib import contextmanager
+if hasattr(agent_sessions, "inventory_read_views"):
+    original_views = agent_sessions.inventory_read_views
+    @contextmanager
+    def measured_views(*args):
+        start = time.monotonic()
+        try:
+            with original_views(*args):
+                yield
+        finally:
+            with lock:
+                counts["max_view_scope_ms"] = max(counts["max_view_scope_ms"],
+                                                  (time.monotonic()-start)*1000)
+    agent_sessions.inventory_read_views = measured_views
+original_build = routes._build_session_list_cache_payload
+def activity_build(*args, **kwargs):
+    if (kwargs.get("_metadata_only") and kwargs.get("active_profile") == "activity-other"
+            and (armed.parent / "cold-fault").exists()):
+        raise OSError("Synthetic cold-profile failure")
+    if not kwargs.get("_metadata_only") or not armed.exists():
+        return original_build(*args, **kwargs)
+    with lock:
+        counts["activity_builds"] += 1
+        ordinal = counts["activity_builds"]
+        counts["building"] += 1
+        counts["max_building"] = max(counts["building"], counts["max_building"])
+    began = time.monotonic()
+    try:
+        if ordinal == 1:
+            counts["slow_started"] += 1
+            counts["slow_start_ms"] = time.time()*1000
+            time.sleep(float(os.environ["PROBE_SLOW"]))
+            counts["slow_end_ms"] = time.time()*1000
+        if ordinal == 2 and os.environ["PROBE_FAIL"] == "1":
+            counts["failure_injected"] += 1
+            raise OSError("Synthetic content failure")
+        return original_build(*args, **kwargs)
+    finally:
+        with lock:
+            counts["max_build_seconds"] = max(counts["max_build_seconds"], time.monotonic()-began)
+            counts["building"] -= 1
+routes._build_session_list_cache_payload = activity_build
 class ProbeHandler(server.Handler):
     def do_GET(self):
+        if self.path == '/__fixture/start-stream':
+            config.register_active_run('fixture-stream', session_id='fixture-session', phase='running')
+            with config.STREAMS_LOCK:
+                config.STREAMS['fixture-stream'] = config.StreamChannel()
+            return routes.j(self, {'active': 'fixture-stream' in models._active_stream_ids()})
         if self.path == '/__fixture/metrics':
             with lock:
                 data = dict(counts)
             data.update(cpu_seconds=time.process_time(), block_inputs=resource.getrusage(resource.RUSAGE_SELF).ru_inblock)
+            data.update(route_session_list_cache.get_session_list_cache_snapshot())
+            data["rss_peak"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             return routes.j(self, data)
         return super().do_GET()
 server.Handler = ProbeHandler
@@ -95,12 +152,174 @@ CREATE INDEX idx_messages_session_timestamp ON messages(session_id,timestamp);
         dict(project_id='webhook-project',name='Webhooks',profile='default')]))
 
 
+def verify_profile_retry(page, home, origin):
+    # A genuinely cold second profile has no CLI rows. Exercise a real signed
+    # profile switch, server-side build failure, and the existing Retry button.
+    other = home/'profiles'/'activity-other'
+    other.mkdir(parents=True, exist_ok=True)
+    (other/'config.yaml').write_text('model: openai/synthetic\n')
+    fault = home/'cold-fault'
+    fault.touch()
+    page.evaluate("async () => { await _switchProfileForSessionLoad('activity-other'); "
+                  "await renderSessionList({deferWhileInteracting:false}); }")
+    retry = page.locator('.session-list-error button')
+    retry.wait_for(state='visible', timeout=10000)
+    assert page.locator('.session-title[data-sid="cli-synthetic-0119"]').count() == 0
+    fault.unlink()
+    # Wait for the new scope to have a successful response before pressing
+    # Retry. Its first build may still be within the bounded retry interval.
+    for _ in range(50):
+        response = page.request.get(origin+'/api/sessions?sidebar_source=cli')
+        if response.ok:
+            assert response.json()['active_profile'] == 'activity-other'
+            break
+        page.wait_for_timeout(100)
+    else:
+        raise AssertionError('Cold profile failed to recover')
+    with page.expect_response(lambda resp: '/api/sessions?' in resp.url and resp.status == 200):
+        retry.click(timeout=3000)
+    page.locator('.session-list-error').wait_for(state='detached', timeout=5000)
+    assert page.evaluate("() => !_sessionListLoadError && _allSessionsScope.profile === 'activity-other'")
+    assert page.locator('.session-title[data-sid="cli-synthetic-0119"]').count() == 0
+
+
+def run_activity(args, origin, home, pages, metrics, output):
+    sid = 'cli-synthetic-0119'
+    selector = f'.session-open-control[data-sid="{sid}"]'
+    for page in pages:
+        page.evaluate("_setSessionSourceFilter('cli')")
+        for _ in range(20):
+            page.evaluate("renderSessionList({deferWhileInteracting:false})")
+            if page.locator(selector).count():
+                break
+            page.wait_for_timeout(250)
+        else:
+            raise AssertionError("Fixture did not render the seeded CLI conversation")
+    if args.activity_mode == 'stream':
+        with urllib.request.urlopen(origin+'/__fixture/start-stream') as response:
+            assert json.load(response)['active']
+    baseline = metrics()
+    start_ms = int(time.time()*1000) + 1500
+    stop = threading.Event()
+    progress = []
+    errors = []
+    wal_peak = [0]
+
+    def write():
+        try:
+            stop.wait(max(0, start_ms/1000 - time.time()))
+            with sqlite3.connect(home/'state.db') as db:
+                while not stop.is_set():
+                    seq = len(progress) + 1
+                    db.execute("UPDATE sessions SET title=?,message_count=message_count+1 WHERE id=?",
+                               (f'Activity {seq}', sid))
+                    db.execute("INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)",
+                               (sid, 'assistant', 'synthetic', time.time()))
+                    db.commit()
+                    progress.append(time.time()*1000)
+                    if seq % 10 == 0:
+                        heartbeat = home/'activity-heartbeat.tmp'
+                        heartbeat.write_text('{}')
+                        heartbeat.replace(home/'gateway_state.json')
+                    wal_peak[0] = max(wal_peak[0], (home/'state.db-wal').stat().st_size)
+                    stop.wait(args.writer_interval)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    writer = threading.Thread(target=write)
+    for page in pages:
+        page.evaluate("""([start, period, duration, sid, selector]) => {
+          const out = window.activitySamples = {rows: [], skipped: 0};
+          let busy = false;
+          setTimeout(() => {
+            const timer = setInterval(async () => {
+              if (Date.now() >= start + duration) { clearInterval(timer); return; }
+              if (busy) { out.skipped++; return; }
+              busy = true;
+              const began = Date.now();
+              let status = 0, title = null;
+              try {
+                const resp = await fetch('/api/sessions?sidebar_source=cli&exclude_hidden=1',
+                                         {signal: AbortSignal.timeout(3000)});
+                status = resp.status;
+                if (resp.ok) title = (await resp.json()).sessions.find(r=>r.session_id===sid)?.title;
+              } catch (_) { status = 0; }
+              const ended = Date.now();
+              if (out.rows.length % 4 === 0)
+                await renderSessionList({deferWhileInteracting:false});
+              const button = document.querySelector(selector);
+              out.rows.push({began, ended, status, title, rendered:button?.textContent,
+                             usable:!!button && !button.disabled});
+              busy = false;
+            }, period);
+          }, Math.max(0, start - Date.now()));
+        }""", [start_ms, args.read_period*1000, args.duration*1000, sid, selector])
+    (home/'activity-start').touch()
+    writer.start()
+    samples = []
+    try:
+        while time.time()*1000 < start_ms + args.duration*1000:
+            samples.append([time.time()*1000, metrics()])
+            pages[0].wait_for_timeout(250)
+    finally:
+        stop.set()
+        writer.join(10)
+    clients = [page.evaluate('window.activitySamples') for page in pages]
+    end = metrics()
+    deadline = time.monotonic() + 5 + end["max_build_seconds"]
+    final_seen = False
+    while time.monotonic() < deadline:
+        reply = pages[0].request.get(origin+'/api/sessions?sidebar_source=cli')
+        if reply.ok and any(row.get('title') == f'Activity {len(progress)}'
+                            for row in reply.json()['sessions']):
+            final_seen = True
+            break
+        pages[0].wait_for_timeout(100)
+    evidence = dict(mode=args.activity_mode, clients=clients, metrics=samples,
+                    before=baseline, after=end, commits_ms=progress, writer_errors=errors,
+                    final_seen=final_seen, peak_wal_bytes=wal_peak[0])
+    evidence['convergence_ms'] = time.time()*1000 - progress[-1] if progress else None
+    (output/'activity.json').write_text(json.dumps(evidence))
+    assert progress and not errors and final_seen
+    assert end.get('slow_started') and (not args.fail_one_refresh or end.get('failure_injected'))
+    assert end['max_building'] == 1
+    for client in clients:
+        rows = client['rows']
+        assert len(rows) >= args.duration / args.read_period * .7
+        assert any(end['slow_start_ms'] <= r['began'] < end['slow_end_ms'] for r in rows)
+        assert all(r['status'] == 200 and r['title'] and r['usable'] for r in rows)
+        for field in ('title', 'rendered'):
+            observed = [int(r[field].split()[-1]) for r in rows if
+                        str(r.get(field)).startswith('Activity ') and r['ended'] <= progress[-1]]
+            assert len(set(observed)) >= 2 and observed == sorted(observed)
+    verify_profile_retry(pages[0], home, origin)
+    evidence['cold_profile_retry'] = True
+    (output/'activity.json').write_text(json.dumps(evidence))
+    print('Passed four-client activity gates:', args.activity_mode, len(progress), 'commits')
+
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--revision')
     parser.add_argument('--screenshots-only', action='store_true')
     parser.add_argument('--output', default='/tmp/hermes-warm-browser-evidence')
+    parser.add_argument('--activity', action='store_true')
+    parser.add_argument('--activity-mode', choices=['external','stream','both'], default='both')
+    parser.add_argument('--duration', type=float, default=120)
+    parser.add_argument('--writer-interval', type=float, default=.1)
+    parser.add_argument('--read-period', type=float, default=.25)
+    parser.add_argument('--clients', type=int, choices=[4], default=4)
+    parser.add_argument('--slow-refresh', type=float, default=2)
+    parser.add_argument('--fail-one-refresh', action='store_true')
     args=parser.parse_args()
+    if args.activity and args.activity_mode == 'both':
+        outcomes = []
+        for mode in ('external', 'stream'):
+            outcomes.append(subprocess.run([sys.executable, __file__, *sys.argv[1:],
+                '--activity-mode', mode, '--output', str(Path(args.output)/mode)]).returncode)
+        if any(outcomes):
+            raise SystemExit(1)
+        return
     output=Path(args.output); output.mkdir(parents=True,exist_ok=True)
     scratch=Path(tempfile.mkdtemp(prefix='webui-inventory-browser-'))
     repo=ROOT
@@ -111,6 +330,9 @@ def main():
             tar.extractall(repo,filter='data')
     home,state=scratch/'agent-home',scratch/'webui'
     seed(home,state)
+    if args.activity:
+        with sqlite3.connect(home/'state.db') as db:
+            assert db.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
     launcher=scratch/'serve.py';launcher.write_text(LAUNCHER)
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
@@ -123,6 +345,7 @@ def main():
         HERMES_WEBUI_TEST_NETWORK_BLOCK='1',HERMES_WEBUI_HOST='127.0.0.1',HERMES_WEBUI_PORT=str(port),
         HERMES_WEBUI_PASSWORD=password,HERMES_WEBUI_AGENT_DIR=str(Path.home()/'.hermes/hermes-agent'),
         HERMES_WEBUI_DEFAULT_WORKSPACE=str(home/'workspace'),AWS_EC2_METADATA_DISABLED='true')
+    env.update(PROBE_SLOW=str(args.slow_refresh), PROBE_FAIL=str(int(args.fail_one_refresh)))
     from playwright.sync_api import sync_playwright
     log=(output/'server.log').open('w')
     proc=subprocess.Popen([str(ROOT/'.venv/bin/python'),str(launcher),str(repo)],cwd=repo,env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -142,10 +365,12 @@ def main():
             installed = sorted((Path.home()/'Library/Caches/ms-playwright').glob(
                 'chromium-*/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'))
             executable = os.getenv('PLAYWRIGHT_CHROMIUM_EXECUTABLE') or (str(installed[-1]) if installed else None)
-            browser=pw.chromium.launch(headless=True, executable_path=executable)
+            browser=pw.chromium.launch(headless=True, executable_path=executable, args=["--disable-background-timer-throttling", "--disable-renderer-backgrounding"])
             contexts=[];pages=[]
             for width,height in [(1280,900),(390,844),(1024,768),(768,1024)]:
                 context=browser.new_context(viewport=dict(width=width,height=height))
+                if args.activity:
+                    context.add_init_script("localStorage.setItem('hermes-session-source-filter','cli')")
                 context.route('**/*',lambda route: route.continue_() if route.request.url.startswith(origin) else route.abort())
                 assert context.request.post(origin+'/api/auth/login',data={'password':password}).ok
                 page=context.new_page()
@@ -154,6 +379,9 @@ def main():
                 page.wait_for_function("typeof renderSessionList === 'function'",timeout=30000)
                 page.evaluate('renderSessionList({deferWhileInteracting:false})')
                 contexts.append(context);pages.append(page)
+            if args.activity:
+                run_activity(args, origin, home, pages, metrics, output)
+                return
             pages[0].screenshot(path=str(output/'desktop.png'),full_page=True,animations='disabled')
             pages[1].evaluate('toggleMobileSidebar()')
             pages[1].screenshot(path=str(output/'narrow.png'),full_page=True,animations='disabled')

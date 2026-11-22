@@ -170,6 +170,8 @@ def _zero_webui_runtime_payload() -> dict[str, Any]:
         },
         "session_list_cache": {
             "available": False, "entries": 0, "inflight_rebuilds": 0, "cap": 0,
+            "publications": 0, "refresh_failures": 0, "safety_refusals": 0,
+            "served_during_refresh": 0, "cold_waits": 0,
         },
         "models_cache": {
             "available": False, "groups": 0, "models": 0, "age_seconds": None,
