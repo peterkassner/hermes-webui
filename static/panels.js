@@ -432,6 +432,11 @@ async function switchPanel(name, opts = {}) {
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
+  if (prevPanel === 'tasks' && nextPanel !== 'tasks') {
+    _cronLoadGeneration++;
+    _stopCronWatch();
+  }
+  if (prevPanel === 'kanban' && nextPanel !== 'kanban') _kanbanInventoryGeneration++;
   _currentPanel = nextPanel;
   // Mobile drawer visibility: a rail/tab click on a phone should surface the
   // panel synchronously, NOT after the panel's async data load. If the re-open
@@ -1046,12 +1051,247 @@ async function loadCronGatewayNotice() {
   }
 }
 
+// #2316: Scripts subtab -- list and read-only view of the profile's
+// ~/.hermes/scripts/ directory. Read-only is the first slice.
+//
+// #7685 finding 3: the pane is PROFILE-OWNED. Every reply is published only
+// if the request was issued for the profile and generation that are still
+// current (the same discipline switchProfile() applies to the conversation
+// list and workspace tree), and an accepted profile switch clears the rows
+// immediately so a newer profile never shows an earlier profile's scripts.
+let _scriptsOwnerProfile='';
+let _scriptsRequestSeq=0;
+let _scriptsLastDir=null;
+// ── #7685 finding 4/5: a transition GENERATION the switch paths bump. A
+// reply's owner key can still equal the current active profile while the
+// switch is in flight (the caller flips S.activeProfile optimistically), so
+// publication must also match this generation. Both switch paths share
+// _invalidateScriptsForProfileSwitch()/_refreshScriptsAfterProfileSwitch()
+// and no path may duplicate the clear/refresh logic below.
+let _scriptsInvalidateSeq=0;
+// Set by the invalidate helper when the Scripts pane was the visible subtab,
+// so the accepted switch can refresh it for the new owner instead of leaving
+// it empty.
+let _scriptsSwitchNeedsRefresh=false;
+
+function _scriptsOwnerKey(){
+  // The server resolves the list against the active profile, so the client's
+  // notion of "who is active" is what ownership means here.
+  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+}
+
+function clearScriptsList(){
+  // Used by the profile-switch path: drop the previous owner's rows without
+  // issuing a fetch that would race the switch.
+  const box=$('scriptsList');
+  if(box) box.innerHTML='';
+  _scriptsOwnerProfile='';
+  _scriptsLastDir=null;
+}
+
+// Shared invalidate: called at the START of EVERY switch path (canonical
+// switchToProfile and the alternate session-load switch). It empties the
+// pane immediately and bumps the generation so a reply still on the wire
+// (success OR error) is refused at publication, so the old profile's rows
+// can neither stay up nor overwrite the new owner's.
+function _invalidateScriptsForProfileSwitch(){
+  _scriptsSwitchNeedsRefresh = _currentTasksSubtab === 'scripts';
+  ++_scriptsInvalidateSeq;
+  clearScriptsList();
+}
+
+// Shared refresh: called when a switch is ACCEPTED (new owner is now the
+// current profile) AND when a switch is REFUSED (we are still on the old
+// profile — restoring beats leaving the pane blank, #7685 finding 5).
+//
+// #7685 finding 1 (MUST-FIX): the refresh decision is made HERE, from the
+// subtab's visibility AT THIS MOMENT, not from a flag captured at switch
+// start. Opening Scripts while a switch is still pending used to leave the
+// flag false, so nothing repainted the pane for the new owner.
+//
+// The load is silent-on-error ONLY when the pane is not visible: a background
+// switch refresh must not paint a banner over a pane we are deliberately
+// repopulating, but a VISIBLE pane that fails to reload must keep showing
+// "Could not load scripts." instead of going blank (#7685 finding 2).
+function _refreshScriptsAfterProfileSwitch(){
+  if (_currentTasksSubtab !== 'scripts') return;
+  _scriptsSwitchNeedsRefresh = false;
+  if (typeof loadScriptsList !== 'function') return;
+  // `silent` is false for a visible pane so a failed reload keeps its error
+  // state; the pane is dimmed while the load is in flight.
+  loadScriptsList(false, false);
+}
+
+// The publication gate every Scripts reply must pass. A reply is current
+// only if the owner it was issued for is STILL the active profile AND no
+// switch has invalidated the pane since AND no newer request superseded it.
+function _scriptsReplyIsCurrent(owner, gen, seq){
+  return owner===_scriptsOwnerKey() && gen===_scriptsInvalidateSeq && seq===_scriptsRequestSeq;
+}
+
+async function loadScriptsList(animate, silent){
+  const box=$('scriptsList');
+  if(!box) return;
+  const owner=_scriptsOwnerKey();
+  const gen=_scriptsInvalidateSeq;
+  const seq=++_scriptsRequestSeq;
+  // The dim belongs to the NEWEST request, whichever one that is. Setting it
+  // only on the animate arm let a superseded request's late reply clear a
+  // newer request's dim (or leave a held request stuck at half opacity when
+  // the newer refresh never animated). A stale reply must return without
+  // touching opacity — the newest request owns it (#7685 opacity fix).
+  if(box) box.style.opacity=animate?'0.5':'';
+  let data;
+  try{
+    data=await api('/api/scripts/list');
+  }catch(_e){
+    // Late reply for a superseded owner/generation, or a silent background
+    // refresh: do not paint either way.
+    if(!_scriptsReplyIsCurrent(owner,gen,seq)){ return; }
+    if(animate) box.style.opacity='';
+    if(!silent){
+      box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_load_failed')||'Could not load scripts.')}</div>`;
+    }
+    return;
+  }
+  // Stale-owner guard: a profile switch (or a newer request) superseded this
+  // one while it was in flight. Publishing would overwrite the current
+  // owner's result with the previous profile's scripts (or an error).
+  if(!_scriptsReplyIsCurrent(owner,gen,seq)){ return; }
+  if(animate) box.style.opacity='';
+  // The main column's Scripts copy says the panel lists this profile's
+  // scripts. On a capability refusal it has to agree with the panel instead
+  // of promising a listing (#7685 release review). Only while the Scripts
+  // tab is showing: the Jobs tab owns that copy otherwise.
+  const mainSub=$('taskDetailEmptySub');
+  const scriptsPane=$('scriptsList');
+  if(mainSub&&scriptsPane&&!scriptsPane.hidden){
+    const subKey=data.unavailable?'scripts_unavailable':'scripts_detail_empty_sub';
+    mainSub.setAttribute('data-i18n',subKey);
+    mainSub.textContent=t(subKey)||(data.unavailable
+      ?'Scripts are unavailable on this platform.'
+      :'This panel lists the scripts in this profile. To view or edit one, open the file on the server.');
+  }
+  const dirCaption=data.directory?`<div class="scripts-dir-caption">${esc(data.directory)}</div>`:'';
+  // A capability refusal is NOT an empty profile: the platform could not
+  // serve the listing at all. Say so instead of showing the empty state.
+  if(data.unavailable){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_unavailable')||'Scripts are unavailable on this platform.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.exists){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_no_directory')||'No scripts directory yet.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.scripts.length){
+    box.innerHTML=dirCaption+`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_empty')||'No scripts in this profile yet.')}</div>`;
+    _scriptsLastDir=data.directory||null;
+    return;
+  }
+  _scriptsLastDir=data.directory||null;
+  box.innerHTML=dirCaption+data.scripts.map(s=>_renderScriptItem(s)).join('');
+}
+
+function _renderScriptItem(s){
+  const name=esc(s.name||'');
+  const desc=s.description?`<div class="scripts-item-desc">${esc(s.description)}</div>`:'';
+  const size=s.size!=null?`<span class="scripts-item-size">${_formatScriptSize(s.size)}</span>`:'';
+  return `<div class="scripts-item" data-script-name="${name}">
+    <div class="scripts-item-head">
+      <span class="scripts-item-name" title="${name}">${name}</span>
+      ${size}
+    </div>
+    ${desc}
+  </div>`;
+}
+
+function _formatScriptSize(bytes){
+  if(bytes==null) return '';
+  if(bytes<1024) return `${bytes} B`;
+  if(bytes<1024*1024) return `${Math.round(bytes/1024)} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+
+let _currentTasksSubtab='jobs';
+function switchTasksSubtab(name){
+  if(name!=='jobs'&&name!=='scripts') return;
+  _currentTasksSubtab=name;
+  // Attribute gate for the jobs-only gateway notice: the notice sets an
+  // inline `display`, so CSS hides it on the Scripts tab via the attribute
+  // selector (#7685 UX review).
+  const panel=$('panelTasks');
+  if(panel) panel.dataset.tasksSubtab=name;
+  const titleEl=$('tasksPanelTitle');
+  if(titleEl){
+    const titleKey=name==='scripts'?'cron_tab_scripts':'scheduled_jobs';
+    titleEl.setAttribute('data-i18n',titleKey);
+    titleEl.textContent=t(titleKey)||(name==='scripts'?'Scripts':'Scheduled jobs');
+  }
+  // The shared Refresh button reloads the active tab (refreshTasksPanel), so
+  // its tooltip and accessible name follow the tab too (#7685 UX review).
+  const refreshBtn=$('cronRefreshBtn');
+  if(refreshBtn){
+    const refreshLabel=name==='scripts'?'Refresh script list':'Refresh job list';
+    refreshBtn.setAttribute('data-tooltip',refreshLabel);
+    refreshBtn.setAttribute('aria-label',refreshLabel);
+  }
+  const jobsBtn=$('tasksTabJobs');
+  const scriptsBtn=$('tasksTabScripts');
+  if(jobsBtn) jobsBtn.classList.toggle('active',name==='jobs');
+  if(scriptsBtn) scriptsBtn.classList.toggle('active',name==='scripts');
+  if(jobsBtn) jobsBtn.setAttribute('aria-selected',String(name==='jobs'));
+  if(scriptsBtn) scriptsBtn.setAttribute('aria-selected',String(name==='scripts'));
+  const cronList=$('cronList');
+  const scriptsList=$('scriptsList');
+  if(cronList) cronList.hidden=(name!=='jobs');
+  if(scriptsList) scriptsList.hidden=(name!=='scripts');
+  // The Scripts tab is a read-only browse of the profile's scripts
+  // directory: there is no "create" action there, so the shared "New job"
+  // button would offer a job action that has nothing to do with the tab
+  // (#7685 open item). Hide it for the whole Scripts tab rather than
+  // relabelling it -- a "New script" button would be a lie, because the
+  // panel cannot create a script either.
+  const newJobBtn=$('cronNewJobBtn');
+  if(newJobBtn) newJobBtn.hidden=(name==='scripts');
+  // The main column's empty state belongs to the Jobs tab: it names a
+  // scheduled job and points at the job detail. On the Scripts tab the
+  // list itself IS the content (a script row is not selectable -- there is
+  // no script detail view yet), so the empty state has to say what the
+  // panel actually offers instead of promising a selection that cannot
+  // happen.
+  const emptyTitle=$('taskDetailEmptyTitle');
+  const emptySub=$('taskDetailEmptySub');
+  if(emptyTitle){
+    const key=name==='scripts'?'scripts_detail_empty_title':'tasks_empty_title';
+    emptyTitle.setAttribute('data-i18n',key);
+    emptyTitle.textContent=t(key)||(name==='scripts'?'Scripts':'Select a scheduled job');
+  }
+  if(emptySub){
+    const key=name==='scripts'?'scripts_detail_empty_sub':'tasks_empty_sub';
+    emptySub.setAttribute('data-i18n',key);
+    emptySub.textContent=t(key)||(name==='scripts'
+      ?'This panel lists the scripts in this profile. To view or edit one, open the file on the server.'
+      :'Pick a job from the sidebar to view its details and runs, or create a new one.');
+  }
+  if(name==='scripts') loadScriptsList(true);
+}
+
+// The panel Refresh button reloads whatever subtab is active (#7685 UX
+// review must-fix 3): Scripts refreshes the script list, Jobs the cron list.
+function refreshTasksPanel(){
+  if(_currentTasksSubtab==='scripts') loadScriptsList(true);
+  else loadCrons(true);
+}
+
 let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
 let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
 let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
 let _cronDetailRefreshKey = null;  // explicit refresh intent survives a superseding poll
 
 async function loadCrons(animate, options) {
+  if (_currentPanel !== 'tasks') return;
   const background = !!(options && options.background);
   const hasDetailRefreshKey = !!(options && Object.prototype.hasOwnProperty.call(options, 'detailRefreshKey'));
   const requestedDetailRefreshKey = hasDetailRefreshKey ? options.detailRefreshKey : null;
@@ -1066,6 +1306,7 @@ async function loadCrons(animate, options) {
   // at entry and bail once a superseded request realises it is no longer the
   // latest, so only the newest render wins.
   const _cronLoadSeq = ++_cronLoadGeneration;
+  const _cronLoadProfile = S.activeProfile || 'default';
   let _resolveCronLoadSettled;
   const _cronLoadSettled = new Promise(resolve => { _resolveCronLoadSettled = resolve; });
   _cronLatestLoadSettled = _cronLoadSettled;
@@ -1081,9 +1322,11 @@ async function loadCrons(animate, options) {
   }
   try {
     await loadCronProfiles();
+    if (_currentPanel !== 'tasks' || _cronLoadProfile !== (S.activeProfile || 'default')) return;
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
-    if (_cronLoadSeq !== _cronLoadGeneration) return data;  // callers still need their fetched jobs
+    if (_cronLoadSeq !== _cronLoadGeneration || _currentPanel !== 'tasks'
+        || _cronLoadProfile !== (S.activeProfile || 'default')) return data;  // callers still need their fetched jobs
     _cronAcceptedLoadGeneration = _cronLoadSeq;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
@@ -1440,9 +1683,12 @@ function _setCronHeaderButtons(mode, job) {
 }
 
 async function _loadCronDetailRuns(jobId, detailKey){
+  if (_currentPanel !== 'tasks') return;
+  const detailProfile = S.activeProfile || 'default';
   try {
     const data = await api(`/api/crons/history?job_id=${encodeURIComponent(jobId)}&limit=50`);
-    if (!_cronDetailMatches(jobId, detailKey)) return;
+    if (_currentPanel !== 'tasks' || detailProfile !== (S.activeProfile || 'default')
+        || !_cronDetailMatches(jobId, detailKey)) return;
     const card = $('cronDetailRuns');
     if (!card) return;
     const outputTitle = _cronOutputTitle(_currentCronDetail);
@@ -2263,10 +2509,13 @@ let _cronWatchTimerInterval = null;
 
 function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
+  if (_currentPanel !== 'tasks') return;
+  const watchProfile = S.activeProfile || 'default';
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
     try {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
+      if (_currentPanel !== 'tasks' || watchProfile !== (S.activeProfile || 'default')) return;
       if (!data.running) {
         _stopCronWatch();
         if (_cronDetailMatches(jobId, detailKey)) {
@@ -2941,7 +3190,21 @@ function _kanbanUnavailableHtml(err){
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
 }
 
+let _kanbanInventoryGeneration = 0;
+function _kanbanInventoryScope(){
+  const profile = S.activeProfile || 'default';
+  const generation = _kanbanInventoryGeneration;
+  return () => _currentPanel === 'kanban'
+    && profile === (S.activeProfile || 'default')
+    && generation === _kanbanInventoryGeneration;
+}
 async function loadKanban(animate){
+  if (_currentPanel !== 'kanban') return;
+  const inventoryProfile = S.activeProfile || 'default';
+  const inventoryGeneration = ++_kanbanInventoryGeneration;
+  const inventoryCurrent = () => _currentPanel === 'kanban'
+    && inventoryProfile === (S.activeProfile || 'default')
+    && inventoryGeneration === _kanbanInventoryGeneration;
   const board = $('kanbanBoard');
   const list = $('kanbanList');
   try {
@@ -2950,9 +3213,12 @@ async function loadKanban(animate){
     // tab archived the previous board, /boards can fall back to default instead
     // of leaving config/board pinned to a ghost slug.
     await loadKanbanBoards();
+    if (!inventoryCurrent()) return;
     const config = await api('/api/kanban/config' + _kanbanBoardQuery());
+    if (!inventoryCurrent()) return;
     let assignees = null;
     try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
+    if (!inventoryCurrent()) return;
     _kanbanApplyConfigDefaults(config);
     const filters = _kanbanCurrentFilters();
     const params = new URLSearchParams();
@@ -2963,6 +3229,7 @@ async function loadKanban(animate){
     if (_kanbanCurrentBoard) params.set('board', _kanbanCurrentBoard);
     const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
     const data = await api(path);
+    if (!inventoryCurrent()) return;
     if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
     _kanbanBoard = data || {columns: []};
     if ((!_kanbanBoard.columns || !_kanbanBoard.columns.length) && config && config.columns) {
@@ -2979,6 +3246,7 @@ async function loadKanban(animate){
     _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
     _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
     await loadKanbanStats();
+    if (!inventoryCurrent()) return;
     // Note: PR #1828 (v0.51.20) moved the boards refresh to the start of
     // loadKanban() so the active board is resolved BEFORE board-scoped
     // requests fire. The previous tail-of-function refresh has been removed
@@ -2989,6 +3257,7 @@ async function loadKanban(animate){
     _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
+    if (!inventoryCurrent()) return;
     const html = _kanbanUnavailableHtml(e);
     if (board) board.innerHTML = html;
     if (list) list.innerHTML = html;
@@ -2998,8 +3267,11 @@ async function loadKanban(animate){
 function filterKanban(){ _kanbanRenderBoard(); }
 
 async function loadKanbanStats(){
+  if (_currentPanel !== 'kanban') return;
+  const inventoryCurrent = _kanbanInventoryScope();
   try {
     const stats = await api('/api/kanban/stats' + _kanbanBoardQuery());
+    if (!inventoryCurrent()) return;
     const el = $('kanbanStats');
     if (!el) return;
     const byStatus = (stats && stats.by_status) || {};
@@ -3025,6 +3297,7 @@ async function refreshKanbanEvents(){
 }
 
 function _kanbanStartPolling(){
+  if (_currentPanel !== 'kanban') return;
   // Prefer SSE for low-latency live updates. Fall back to polling on
   // browsers without EventSource or after repeated stream failures.
   if (typeof EventSource === 'undefined' || _kanbanEventSourceFailures >= 3) {
@@ -3041,6 +3314,7 @@ function _kanbanStopPolling(){
 }
 
 function _kanbanStartEventStream(){
+  if (_currentPanel !== 'kanban') return;
   // Tear down any prior stream before opening a new one (board switch,
   // login change, etc.).
   if (_kanbanEventSource) { try { if(_kanbanEventSource.readyState!==2)_kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
@@ -3072,6 +3346,7 @@ function _kanbanStartEventStream(){
     _scheduleKanbanRefresh(data.events);
   });
   es.onerror = () => {
+    if (_currentPanel !== 'kanban' || es !== _kanbanEventSource) return;
     _kanbanEventSourceFailures += 1;
     if (_kanbanEventSourceFailures >= 3) {
       // Give up on SSE for this session — fall back to HTTP polling.
@@ -4144,6 +4419,8 @@ function _kanbanSetSavedBoard(slug){
 }
 
 async function loadKanbanBoards(){
+  if (_currentPanel !== 'kanban') return;
+  const inventoryCurrent = _kanbanInventoryScope();
   // Fetches the boards list and updates the switcher UI. Best-effort —
   // failures hide the switcher rather than blocking the panel from rendering.
   const switcher = document.getElementById('kanbanBoardSwitcher');
@@ -4153,9 +4430,10 @@ async function loadKanbanBoards(){
     data = await api('/api/kanban/boards');
   } catch(e) {
     // Hide switcher on error so the user isn't stuck with a half-broken UI.
-    switcher.hidden = true;
+    if (inventoryCurrent()) switcher.hidden = true;
     return;
   }
+  if (!inventoryCurrent()) return;
   const boards = (data && data.boards) || [];
   const serverCurrent = (data && data.current) || 'default';
   _kanbanBoardsList = boards;
@@ -7505,6 +7783,15 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
+  // #7685 finding 3/4/5: drop the previous profile's Scripts rows now.
+  // Without this the next profile kept showing the earlier profile's scripts
+  // until the user clicked the subtab, and a late reply from the old owner
+  // could then overwrite the new one's list. The shared invalidate helper
+  // bumps the pane's transition generation so requests already in flight are
+  // refused at publication, and marks the visible pane for refresh.
+  if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+    _invalidateScriptsForProfileSwitch();
+  }
   // Determine whether the current session must be replaced instead of being
   // retagged in place. A session with messages/active runtime belongs to the
   // current profile. After the profile-switch POST returns, we also treat an
@@ -7522,6 +7809,7 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let _reasoningSwitchHeld = false;
   // Stale-snapshot guard ownership for THIS switch: armed the instant
   // S.activeProfile changes (see below), handed to the settings reconciliation
   // on success, released in `finally` on every other exit. The counter arms are
@@ -7555,6 +7843,11 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if (typeof _beginReasoningProfileSwitch === 'function') {
+      _reasoningSwitchHeld = true;
+      await _beginReasoningProfileSwitch();
+    }
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     // A retained empty-composer pick belongs to the old profile's providers; keeping it
@@ -7577,6 +7870,25 @@ async function switchToProfile(name) {
     if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
+    }
+    // #7685 finding 3/4/5: the switch is accepted, so the Scripts pane's
+    // owner is now this profile. If it was the visible subtab, refresh it for
+    // the new owner (its rows were cleared at switch start). The load's own
+    // owner/generation gate drops any still-in-flight reply from the old
+    // owner.
+    //
+    // #7685 finding 1 (MUST-FIX): invalidate AGAIN here, at accept. The
+    // canonical switch does not change S.activeProfile until its POST
+    // returns, so a list load issued while the switch was PENDING captured
+    // the OLD owner key and passed its gate — it repainted the previous
+    // profile's rows under the new profile. Bumping the generation at accept
+    // retires that in-flight reply, and the refresh below repopulates the
+    // pane for the owner that is now current.
+    if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+      _invalidateScriptsForProfileSwitch();
+    }
+    if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+      _refreshScriptsAfterProfileSwitch();
     }
     // #7509: the slash-skill caches hold the previous profile's disabled-filtered
     // /api/skills payload, so drop them once the switch has actually succeeded —
@@ -7793,13 +8105,21 @@ async function switchToProfile(name) {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —
-        // clear the up-front workspace skeleton so it doesn't strand on a switch
+        // clear the up-front workspace skeleton so it can't strand on a switch
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
+      }
+      // #7685 finding 5: the Scripts pane was cleared at switch start but the
+      // switch never took effect, so the old profile is still active. Restore
+      // it for that profile instead of leaving the pane blank. The refresh is
+      // silent-on-error so a failed restore cannot paint a spurious banner.
+      if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+        _refreshScriptsAfterProfileSwitch();
       }
     }
     return false;
   } finally {
+    if (_reasoningSwitchHeld) _endReasoningProfileSwitch();
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
     if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
@@ -11964,6 +12284,8 @@ function _buildProviderQuotaCard(status){
   const card=document.createElement('div');
   const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
   card.className='provider-quota-card provider-quota-card-'+state;
+  // No provider configured is a neutral state, not a failure: keep its message muted.
+  if(!status.provider) card.classList.add('provider-quota-card-neutral');
   const accountLimits=status.account_limits||null;
   const providerBase=status.display_name||status.provider||t('provider_quota_active_provider');
   const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
@@ -11971,7 +12293,9 @@ function _buildProviderQuotaCard(status){
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
-    const details=Array.isArray(accountLimits.details)&&!accountLimits.pool?accountLimits.details:[];
+    // A pool snapshot's own details only repeat the breakdown below; usage-API details
+    // (e.g. credit balance) are the account's and stay visible next to the pool.
+    const details=Array.isArray(accountLimits.details)&&(!accountLimits.pool||accountLimits.source==='usage_api')?accountLimits.details:[];
     const windowHtml=windows.map(w=>{
       const used=_formatProviderQuotaPercent(w&&w.used_percent);
       const reset=_formatProviderQuotaReset(w&&w.reset_at);
@@ -11992,6 +12316,9 @@ function _buildProviderQuotaCard(status){
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
     body=windowHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
+    // A pool breakdown shown next to a failure reflects locally recorded credential
+    // state, not the failed check: keep the failure message visible above it.
+    else if(status.status!=='available'&&status.message) body=`<div class="provider-quota-message">${esc(status.message)}</div>`+body;
   }else if(status.status==='available'&&quota){
     body=`
       <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_remaining'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
@@ -13846,7 +14173,7 @@ function _resetCronUnreadForProfileSwitch(){
 // Auto-refresh the cron list when a job is created from chat or any external source.
 // The chat path dispatches this event when the agent response mentions cron creation.
 window.addEventListener('hermes:cron_created', () => {
-  if ($('cronList')) loadCrons();
+  if (_currentPanel === 'tasks' && $('cronList')) loadCrons();
 });
 
 function startCronPolling(){
@@ -14331,7 +14658,16 @@ function _renderGatewayStatus(r){
       return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
-  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+  // #8621: the card shows one separator, and it is the one the translator
+  // chose. A label that already ends in a colon keeps it -- a full-width "：",
+  // or a French " : " -- and only a label with no colon gets the template's
+  // ": ". An ASCII colon is followed by a space, a full-width one is not.
+  const _laLabel=t('gateway_last_active');
+  const _laSep=/([：:])\s*$/u.exec(_laLabel);
+  const _laText=_laSep
+    ? _laLabel.slice(0,_laSep.index)+_laSep[1]+(_laSep[1]===':'?' ':'')
+    : _laLabel+': ';
+  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(_laText)}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
   const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} ${esc(r.session_count!==1?t('gateway_sessions'):t('gateway_session'))}</span>`:'';
   card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>${_gatewayActionControls(r)}`;
 }

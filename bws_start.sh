@@ -8,6 +8,8 @@ umask 077
 PROJECT_DIR="/Users/peterkjackson/Applications/hermes-webui"
 LOG_FILE="$PROJECT_DIR/webui_launch.log"
 ERR_FILE="$PROJECT_DIR/webui_error.log"
+RUN_MARKER="${HERMES_WEBUI_RUN_MARKER:-$HOME/.hermes/webui/service-enabled}"
+export HERMES_WEBUI_RUN_MARKER="$RUN_MARKER"
 
 # launchd gets a tiny PATH; make Homebrew/user-installed tools visible.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/Users/peterkjackson/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -23,6 +25,15 @@ require_cmd() {
 }
 
 cd "$PROJECT_DIR" || { err "Cannot cd to $PROJECT_DIR"; exit 1; }
+
+# The launchd job uses this marker as its KeepAlive condition.  Crashes and
+# external signals leave it in place, so launchd restarts the WebUI.  The GUI
+# Stop action removes it before shutting down, which makes an intentional quit
+# persist until the launcher app arms the service again.
+if [[ ! -f "$RUN_MARKER" ]]; then
+  log "WebUI is intentionally stopped; run marker is absent."
+  exit 0
+fi
 
 SECRET_ID="${HERMES_WEBUI_PW_SECRET_ID:-}"
 if [[ -z "$SECRET_ID" && -r "$HOME/.hermes/.env" ]]; then
@@ -129,6 +140,16 @@ fi
 # bootstrap.py normally loads repo .env and overwrites existing values. Preserve
 # the BWS-resolved password so stale local .env cannot cause invalid logins.
 export HERMES_WEBUI_PRESERVE_ENV=1
+export HERMES_WEBUI_AGENT_DIR="${HERMES_WEBUI_AGENT_DIR:-$HOME/.hermes/hermes-agent}"
+export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HOME/.hermes/webui}"
+export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
+export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
+# Keep this wrapper out of Hermes runtime selection. A package-managed Agent
+# re-execs into its current managed Python and selects the matching dependency
+# generation; disabling that handoff leaves WebUI on the obsolete 3.11 venv.
+export HERMES_WEBUI_TLS_INSECURE_PROBE="${HERMES_WEBUI_TLS_INSECURE_PROBE:-1}"
+# The GUI restart control is opt-in and uses launchd, the sole process owner.
+export HERMES_WEBUI_RESTART_COMMAND="${HERMES_WEBUI_RESTART_COMMAND:-$PROJECT_DIR/scripts/macos_launchd_control.sh restart}"
 
 if [[ "${HERMES_WEBUI_DRY_RUN:-}" == "1" ]]; then
   if [[ "$HERMES_WEBUI_PASSWORD" != "$HERMES_WEBUI_PW" ]]; then
@@ -139,17 +160,19 @@ if [[ "${HERMES_WEBUI_DRY_RUN:-}" == "1" ]]; then
   exit 0
 fi
 
-export HERMES_WEBUI_AGENT_DIR="${HERMES_WEBUI_AGENT_DIR:-$HOME/.hermes/hermes-agent}"
-export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-$HOME/.hermes/webui}"
-export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
-export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
-export HERMES_WEBUI_TLS_INSECURE_PROBE="${HERMES_WEBUI_TLS_INSECURE_PROBE:-1}"
-# The GUI restart control is opt-in and uses launchd, the sole process owner.
-export HERMES_WEBUI_RESTART_COMMAND="${HERMES_WEBUI_RESTART_COMMAND:-/bin/launchctl kickstart -k gui/$(id -u)/com.peterkjackson.hermes-webui}"
+# Launchd does not source zsh. Keep the picker aligned with the user's explicit
+# path exports without loading their interactive shell or replacing manual choices.
+if workspace_sync_output="$(python3 scripts/sync_zsh_workspaces.py 2>> "$ERR_FILE")"; then
+  log "$workspace_sync_output"
+else
+  err "zsh workspace sync failed; continuing with the existing workspace list."
+fi
 
-log "Starting Tailscale Funnel -> https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}"
-if ! tailscale funnel --bg --yes "https+insecure://127.0.0.1:${HERMES_WEBUI_PORT}" >> "$LOG_FILE" 2>> "$ERR_FILE"; then
-  err "Tailscale Funnel start command failed; continuing to start WebUI."
+# Non-tailnet clients use this HTTPS endpoint too. Serve would silently
+# remove Funnel access on every restart; preserve the public, authenticated route.
+log "Starting Tailscale Funnel on :8443 -> http://127.0.0.1:${HERMES_WEBUI_PORT}"
+if ! tailscale funnel --bg --yes --https=8443 "http://127.0.0.1:${HERMES_WEBUI_PORT}" >> "$LOG_FILE" 2>> "$ERR_FILE"; then
+  err "Tailscale Funnel setup for WebUI failed; continuing to start WebUI."
 fi
 
 log "Starting Hermes WebUI on ${HERMES_WEBUI_HOST}:${HERMES_WEBUI_PORT}"

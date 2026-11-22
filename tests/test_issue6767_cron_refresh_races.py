@@ -31,6 +31,7 @@ let renders=0,clears=0,opened=null,writes=[],renderedJob=null;const pending=[];
 let _cronDetailRefreshKey = null,_cronLatestLoadSettled=Promise.resolve();
 const localStorage = {getItem(){return null;},setItem(){}};
 let _currentPanel = 'tasks';
+const S={activeProfile:'default'};
 function api(url,opts){if(opts){writes.push(url);return Promise.resolve({id:'saved'});}return new Promise((resolve,reject)=>pending.push({resolve,reject}));}
 async function loadCronProfiles(){} function loadCronGatewayNotice(){}
 function esc(s){return String(s);} function t(s){return s;} function showToast(){}
@@ -342,6 +343,17 @@ def test_save_completion_preserves_newer_view(editing, replacement):
         "new_form": "fields.cronFormError=node();_editingCronId='other';",
         "panel": "_currentPanel='chat';",
     }[replacement]
+    if replacement == "panel":
+        # Intentional warm-inventory contract: hidden Tasks performs no new
+        # history read, and the earlier in-flight read cannot repaint it.
+        run_js(prefix + "const save=saveCronForm();await waitRequests(1);" + switch + """
+await loadCrons(false,{background:true});
+assert.equal(pending.length,1);
+pending[0].resolve({jobs:[{id:'saved',name:'Saved while hidden'}]});await save;
+assert.equal(opened,null);
+assert.deepEqual(_cronList.map(j=>j.id),['existing']);
+""")
+        return
     run_js(prefix + "const save=saveCronForm();await waitRequests(1);" + switch + """
 const newer=loadCrons(false,{background:true});await waitRequests(2);
 pending[1].resolve({jobs:[{id:'other',name:'Other'}]});await newer;

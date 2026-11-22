@@ -23,6 +23,17 @@ unrelated work. Keep subsystem-specific safety and contract requirements below.
 - `docs/UIUX-GUIDE.md` and `DESIGN.md` for layout, interaction flow, themes,
   chat rendering, and composer chrome
 
+## Active local deployment policy
+
+Use `master` for development and for the local launchd-served checkout.
+The fork removes application-side virtual-keyboard GUI accommodation:
+keyboard inset measurements, `visualViewport` keyboard listeners, iOS focus-zoom
+rules, and keyboard-driven popup repositioning. The browser/OS is authoritative
+for virtual-keyboard and viewport geometry on every form factor. This is a
+purposeful iPadOS regression experiment after layered compensation displaced the
+composer into blank space; do not reintroduce a workaround without physical iPad
+and iPhone verification and explicit operator approval.
+
 ## Onboarding and reinstall support
 
 If the task involves install, reinstall, bootstrap, first-run onboarding,

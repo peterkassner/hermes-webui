@@ -1,5 +1,69 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Shared warm session inventory
+
+Use a fresh disposable root and the repository runner:
+
+```sh
+trial_root=$(mktemp -d "${TMPDIR:-/tmp}/webui-inventory-tests.XXXXXX")
+export HERMES_HOME="$trial_root/home"
+export HERMES_BASE_HOME="$trial_root/base"
+export HERMES_CONFIG_PATH="$trial_root/home/config.yaml"
+export HERMES_WEBUI_STATE_DIR="$trial_root/webui"
+export HERMES_WEBUI_TEST_STATE_DIR="$trial_root/tests"
+mkdir -p "$HERMES_HOME" "$HERMES_BASE_HOME" "$HERMES_WEBUI_STATE_DIR"
+./scripts/test.sh -q tests/test_warm_cache_activity.py tests/test_warm_session_inventory.py tests/test_warm_inventory_client.py tests/test_session_sidebar_cache.py tests/test_issue4842_cli_cache_streaming.py tests/test_cli_sessions_cache_fingerprint.py tests/test_session_list_cache_bounded.py tests/test_streaming_cache_ttl_vs_poll.py tests/test_cli_session_metadata_fastpath.py tests/test_cli_session_metadata_fastpath_integration.py tests/test_gateway_watcher_idle_park.py tests/test_gateway_watcher_profile.py tests/test_gateway_watcher_resubscribe_fresh.py tests/test_issue5501_session_list_retry_affordance.py tests/test_issue3019_cron_project_sessions.py tests/test_webhook_project_sessions.py tests/test_project_assigned_cli_session_limit.py tests/test_pr7555_cli_session_availability.py
+```
+
+`tests/browser_warm_session_inventory.py` starts its own localhost server with
+synthetic SQLite/sidecar histories, isolated configuration and a synthetic login.
+It uses four independent authenticated Chromium contexts, including narrow widths,
+and blocks browser requests to external origins. Server outbound network access is
+blocked too. No provider calls or live state are needed. It records 20 reads per
+endpoint, screenshots, request paths, real reader/build counts and an unchanged
+11-second no-browser interval. An external edit is made with all browsers closed,
+then checked on reconnect. The probe always terminates its own server.
+
+```sh
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --output /tmp/webui-inventory-after
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --revision CHECKPOINT_COMMIT --output /tmp/webui-inventory-before
+```
+
+The temporary Playwright package is verification tooling, not an application
+dependency. An installed Chromium is required; set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` when necessary. The probe uses the current
+repository `.venv` for both server revisions. Its metrics endpoint exists only in
+the disposable launcher, never in the application server.
+
+Check that ordinary boot and warm reads perform zero background history passes,
+filtered sidebar reads add no inventory builds, each selected background project
+loads its own history, and unchanged idle scopes cause no expensive rebuilds.
+A successful empty store, failed read and slow-owner deadline are distinct tests.
+Compare cold/preparation behavior separately from already-warm timings; mocks and
+small synthetic histories do not reproduce a large production database or prove
+public-ingress/iPad performance. Do not restart production or flush live caches to
+manufacture cold results.
+
+### Active-chat sidebar availability
+
+Run the same activity probe sequentially against the pre-correction checkpoint
+and the working tree. Each invocation starts separate disposable servers for
+external WAL writes and writes while a fixture-owned stream/run is registered.
+
+```sh
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --revision 3b9f7be39 --activity --fail-one-refresh --output "$trial_root/activity-before"
+uv run --no-project --with playwright python tests/browser_warm_session_inventory.py --activity --fail-one-refresh --output "$trial_root/activity-after"
+```
+
+Each mode starts with a warm list, commits a message and title roughly every
+100 ms for two minutes, and polls every 250 ms in each of four authenticated
+Chromium contexts. The fixture delays one projection by two seconds and fails
+another. Each mode writes `activity.json` before applying its acceptance checks.
+The checkpoint is expected to exit nonzero. Inspect individual client responses,
+rendered titles, skipped polls, successful publications, WAL size and server
+peak RSS. An eligible list must survive both faults and advance while writes
+continue. The last committed title must converge after writing stops.
+
 ## User-bounded legacy tool anchors (#8427)
 
 Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.
@@ -768,6 +832,52 @@ EXPECT:
   - The dropdown updates to "Gemini 2.5 Pro"
   - Switching away and back to the conversation restores the same model in the footer selector
 FAIL: Dropdown shows the wrong active model after a session switch, or sending uses a stale model.
+
+### T3.2a: Reasoning Effort Reflects Active Conversation
+SETUP: Two sessions using the same reasoning-capable model.
+STEPS:
+  1. In session A, select Low reasoning effort.
+  2. In session B, select High reasoning effort.
+  3. Switch A → B → A using the sidebar.
+  4. Repeat at desktop width and at a narrow/mobile width using the mobile composer configuration action.
+  5. Reload the page on each session and send a turn.
+EXPECT:
+  - The reasoning chip/action reads Low in session A and High in session B after every switch and reload.
+  - The next turn in each session uses that session's restored effort.
+  - The model chip remains unchanged when both sessions use the same model.
+FAIL: The reasoning control keeps the previously viewed session's value, resets after reload, or the next turn uses a stale effort.
+
+Repeat with different models: use a fast model with High/XHigh/Max in session A
+and a flagship model with Low in session B, selecting efforts supported by each
+model. Both the model and reasoning controls must restore together on desktop
+and narrow/mobile after A → B → A and reload. Capture before/after screenshots
+of both sessions for PR review.
+
+Configuration regressions are covered by `tests/test_session_reasoning_effort.py`:
+new-session model/effort defaults honor an external `HERMES_CONFIG_PATH` for root.
+With request-local context set to a named profile, a root/external config override
+must not replace that profile's model or effort; an override inside its own home
+still applies. Gateway legacy and runs API requests use the named session
+profile's reasoning default when no stored override exists. An explicit session
+override wins over both the named and process/root profile values. With distinct
+root/named Gateway URLs and keys, the initial request's URL, Authorization header,
+and retained stream endpoint must all belong to the session's profile, matching
+the endpoint used for reattachment, Stop, and approval replies while the stream
+holds it. (Once that entry is cleaned up, Stop and approval fall back to the
+ambient endpoint, as on master.)
+
+Same-chat ordering is covered by `tests/test_reasoning_effort_save_race.py` too:
+pick High then Low in one chat with the first save delayed. Low must not be sent
+until High settles, and the chip must end on Low. If the newest save fails, the
+chip must re-read the stored value.
+
+Delayed-save regressions are covered by `tests/test_reasoning_effort_save_race.py`.
+With a throttled connection, change A's effort through the dropdown or
+`/reasoning high`, then switch to B before the save returns. B must keep its own
+effort after the response and routine topbar sync; returning to A must fetch its
+saved effort. Repeat on desktop and mobile, and with a model, provider, or profile
+change while the save is pending. A save in an unchanged context must still update
+both desktop and mobile labels, even if an older reasoning GET returns afterward.
 
 ### T3.3: Context Badge Shares Footer Space Cleanly
 SETUP: Active session with at least one completed response.

@@ -4,7 +4,9 @@ import logging
 import os
 import sqlite3
 import sys
-from contextlib import closing
+import time
+from contextlib import ExitStack, closing, contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
 
@@ -87,6 +89,80 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
     return sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
+
+
+# Bound to one synchronous inventory builder. Normal readers own their handles.
+_inventory_views = ContextVar("inventory_read_views", default=None)
+_INVENTORY_READ_BUDGET_SECONDS = 30
+
+
+def building_inventory():
+    return _inventory_views.get() is not None
+
+
+def inventory_sidecars():
+    views = _inventory_views.get()
+    return views[3] if views else None
+
+
+@contextmanager
+def inventory_read_views(sidecars=None):
+    with ExitStack() as stack:
+        deadline = time.monotonic() + _INVENTORY_READ_BUDGET_SECONDS
+        token = _inventory_views.set((stack, {}, deadline, sidecars))
+        try:
+            yield
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Session inventory read budget exceeded")
+        finally:
+            _inventory_views.reset(token)
+
+
+@contextmanager
+def inventory_connection(path, log=None):
+    views = _inventory_views.get()
+    if views is None:
+        with closing(open_state_db_readonly(path, log)) as conn:
+            yield conn
+        return
+    stack, connections, deadline, _ = views
+    if time.monotonic() >= deadline:
+        raise TimeoutError("Session inventory read budget exceeded")
+    path = Path(path).resolve()
+    if path not in connections:
+        conn = stack.enter_context(closing(open_state_db_readonly(path, log)))
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 10000)
+        conn.execute("BEGIN")
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        connections[path] = conn
+    yield connections[path]
+
+
+def inventory_row_safety(db_path, session_ids):
+    """Read only eligibility/ownership columns for the bounded published IDs."""
+    ids = sorted(set(session_ids))
+    if not ids or not db_path.exists():
+        return {}
+    with inventory_connection(db_path) as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "id" not in cols:
+            raise ValueError("Session database schema unavailable")
+        fields = [name for name in (
+            "id", "source", "session_source", "profile", "user_id", "chat_id",
+            "session_key", "thread_id", "origin_user_id", "origin_chat_id",
+            "project_id", "archived", "default_hidden", "parent_session_id",
+            "end_reason",
+        ) if name in cols]
+        result = {}
+        for offset in range(0, len(ids), 400):
+            batch = ids[offset:offset + 400]
+            marks = ",".join("?" for _ in batch)
+            query = f"SELECT {','.join(fields)} FROM sessions WHERE id IN ({marks})"
+            for row in conn.execute(query, batch):
+                result[row[0]] = tuple(row[1:])
+        return result
 
 
 MESSAGING_SOURCES = {
@@ -848,8 +924,7 @@ def read_importable_agent_session_rows(
         return _result([])
 
     log = log or logger
-    conn = open_state_db_readonly(db_path, log=log)
-    with closing(conn):
+    with inventory_connection(db_path, log) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
@@ -1266,7 +1341,7 @@ def read_assigned_project_row_counts(
     if not db_path.exists():
         return {}
     try:
-        with closing(open_state_db_readonly(db_path, log)) as conn:
+        with inventory_connection(db_path, log) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
             session_cols = {row[1] for row in cur.fetchall()}
@@ -1493,7 +1568,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         return {}
 
     try:
-        with closing(open_state_db_readonly(db_path)) as conn:
+        with inventory_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")

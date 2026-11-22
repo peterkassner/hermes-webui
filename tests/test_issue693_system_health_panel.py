@@ -864,7 +864,9 @@ def test_session_list_cache_snapshot_reads_scalars_without_lru_mutation():
             cache._SESSIONS_CACHE_LOCK, cache._SESSIONS_CACHE, {("one",): (0.0, (), {})}
         ) as original:
             result = cache.get_session_list_cache_snapshot()
-            assert result == {"available": True, "entries": 1, "inflight_rebuilds": 0, "cap": 64}
+            assert result == {"available": True, "entries": 1, "inflight_rebuilds": 0,
+                              "cap": 64, **cache._WARM_COUNTS}
+            assert all(isinstance(value, int) and value >= 0 for value in cache._WARM_COUNTS.values())
             assert list(cache._SESSIONS_CACHE) == [("one",)]
 
         assert list(cache._SESSIONS_CACHE) == list(original)

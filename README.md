@@ -11,6 +11,14 @@ the **composer footer** — always visible while composing. A circular context r
 shows token usage at a glance. All settings and session tools are in the
 **Hermes Control Center** (launcher at the sidebar bottom).
 
+Session lists are prepared in the background and shared across connected devices.
+During an active chat, the sidebar keeps showing the last eligible list while
+the server prepares newer titles, counts and ordering.
+Cron, webhook and kanban histories load when their corresponding view is opened.
+A server restart has an initial preparation interval; a temporary loading failure
+can be retried without treating it as an empty account. See
+[session loading behavior](docs/architecture/warm-session-inventory.md).
+
 Setup Hermes so you can access it natively on every device:
 
 <img width="1467" height="881" alt="image" src="https://github.com/user-attachments/assets/9a72cdf3-a5b4-45ed-a836-a715ce46287e" />
@@ -233,6 +241,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
 - Sessions persist across page reloads and SSH tunnel reconnects
+- Model and reasoning-effort selections are restored per session; new-session defaults and legacy-session reasoning fallback use that session's profile configuration, including an authoritative `HERMES_CONFIG_PATH` for root; named profiles use their own `config.yaml` unless the override resolves inside that profile home
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
@@ -380,12 +389,13 @@ before the session's named-profile Gateway ownership is known.
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
-- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
+- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts; a **Scripts** subtab for a read-only browse of the profile's `~/.hermes/scripts/` directory (see [docs/scripts-panel.md](docs/scripts-panel.md))
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session; hidden while the in-chat task list toggle is on, which also disables the workspace-panel Todos tab
 - **Insights** -- token, cost, and skill-usage analytics; period presets (7/30/90/365 days) plus a **Custom range** with start/end date pickers
+- **Artifacts** -- files changed in the session and Skills Used, with a separate skill count and per-skill use counts
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 
 ### Mobile responsive
@@ -395,6 +405,15 @@ before the session's named-profile Gateway ownership is known.
 - Touch targets minimum 44px on all interactive elements
 - Full-height chat/composer on phones without bottom-nav spacing
 - Desktop layout completely unchanged
+
+### Local deployment: OS-owned virtual-keyboard geometry
+
+This fork uses `master` for development and local deployment. It deliberately contains **no application-side virtual-keyboard
+GUI compensation** on iPhone, iPad, or any other form factor: no keyboard-inset
+measurement, `visualViewport` keyboard listeners, focus-zoom override, or
+keyboard-driven dropdown repositioning. The browser/OS owns keyboard and viewport
+drawing. This behavior was adopted after iPadOS composer focus exposed that layered
+workarounds can fight the OS and leave the app displaced into blank space.
 
 ---
 
@@ -553,10 +572,14 @@ The server binds to `127.0.0.1` by default. To reach it from another machine,
 use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh`
 prints for you over SSH) or, on a single-operator or access-restricted tailnet,
 use the preferred [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)
-flow, which keeps WebUI on loopback behind tailnet-only HTTPS. Direct access to
-`http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` and
-`HERMES_WEBUI_PASSWORD` is a fallback when Serve is unavailable. Full setup and
-the community ARM64-Android field report: [`docs/remote-access.md`](docs/remote-access.md).
+flow, which keeps WebUI on loopback behind tailnet-only HTTPS. For public access,
+Tailscale Funnel or Serve should proxy `http://127.0.0.1:8787`; Tailscale
+terminates HTTPS. Do not keep repo-local `server.crt` or `server.key` files for
+this deployment: they force direct HTTPS and break the HTTP origin assumed by the
+proxy. Direct access to `http://<server-tailscale-ip>:8787` with
+`HERMES_WEBUI_HOST=0.0.0.0` and `HERMES_WEBUI_PASSWORD` is only a fallback when
+Serve is unavailable. Full setup and the community ARM64-Android field report:
+[`docs/remote-access.md`](docs/remote-access.md).
 
 ### Manual launch (without start.sh)
 
@@ -789,6 +812,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
 - [`docs/kanban.md`](docs/kanban.md) — the Kanban board's status flow: who may set which column, how tasks enter and leave Scheduled, and the parent re-gating on Scheduled/Blocked → Ready
+- [`docs/scripts-panel.md`](docs/scripts-panel.md) — the Tasks panel's Scripts subtab: where the profile's `~/.hermes/scripts/` directory comes from, the read-only endpoints, and the containment rules
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**

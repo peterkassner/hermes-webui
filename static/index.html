@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Hermes</title>
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash).
      MUST appear before manifest/favicon links so browsers resolve relative URLs against the
@@ -71,7 +71,7 @@
     };
   }
 })()</script>
-<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__&amp;session-title-style=3">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -208,14 +208,23 @@
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
       <div class="panel-head">
-        <span data-i18n="scheduled_jobs">Scheduled jobs</span>
+        <span id="tasksPanelTitle" data-i18n="scheduled_jobs">Scheduled jobs</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="cronRefreshBtn" onclick="loadCrons(true)" data-tooltip="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="cronRefreshBtn" onclick="refreshTasksPanel()" data-tooltip="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="cronNewJobBtn" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
+      <!-- #2316: Tasks subtab switch (Jobs | Scripts). Default tab is Jobs
+           so existing users see no behavioural change until they click. -->
+      <div class="tasks-subtab" role="tablist" aria-label="Tasks view">
+        <button type="button" class="tasks-subtab-btn active" id="tasksTabJobs" role="tab" aria-selected="true" data-i18n="cron_tab_jobs" onclick="switchTasksSubtab('jobs')">Jobs</button>
+        <button type="button" class="tasks-subtab-btn" id="tasksTabScripts" role="tab" aria-selected="false" data-i18n="cron_tab_scripts" onclick="switchTasksSubtab('scripts')">Scripts</button>
+      </div>
       <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
-      <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="cron-list" id="cronList" data-tasks-subtab="jobs"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="scripts-list" id="scriptsList" data-tasks-subtab="scripts" hidden>
+        <div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div>
+      </div>
     </div>
     <!-- Kanban panel -->
     <div class="panel-view" id="panelKanban">
@@ -511,6 +520,11 @@
         <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="Dismiss Hermes agent heartbeat alert">Dismiss</button>
       </div>
     </div>
+    <div class="memory-off-notice" id="memoryOffNotice" role="status" aria-live="polite" hidden>
+      <svg class="memory-off-notice-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+      <span class="memory-off-notice-text" id="memoryOffNoticeText"></span>
+      <button type="button" class="memory-off-notice-dismiss" id="memoryOffNoticeDismiss" onclick="dismissMemoryOffNotice()" data-i18n-aria-label="memory_off_notice_dismiss" aria-label="Dismiss memory notice"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    </div>
     <div class="composer-wrap" id="composerWrap">
       <div class="composer-flyout">
       <!-- Queue flyout: slides up from behind composer, same pattern as approval-card -->
@@ -623,7 +637,7 @@
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
-        <textarea id="msg" rows="1" enterkeyhint="enter" placeholder="Message Hermes…"></textarea>
+        <textarea id="msg" rows="1" inputmode="text" enterkeyhint="enter" placeholder="Message Hermes…" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
         <div id="composerWorkspaceContext" class="sr-only"></div>
         <div class="composer-footer">
           <div class="composer-left">
@@ -866,8 +880,8 @@
       <div class="main-view-body" id="taskDetailBody" style="display:none"></div>
       <div class="main-view-empty" id="taskDetailEmpty">
         <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        <div class="main-view-empty-title" data-i18n="tasks_empty_title">Select a scheduled job</div>
-        <div class="main-view-empty-sub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
+        <div class="main-view-empty-title" id="taskDetailEmptyTitle" data-i18n="tasks_empty_title">Select a scheduled job</div>
+        <div class="main-view-empty-sub" id="taskDetailEmptySub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
       </div>
     </div>
     <div id="mainKanban" class="main-view">
@@ -1329,7 +1343,7 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the app is in the background.</div>
               <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
                 <span id="notificationPermissionButtonWrap" style="display:inline-flex">
-                  <button type="button" class="sm-btn" id="notificationPermissionButton" onclick="enableWebPush().then(()=>showToast('Web Push enabled.')).catch(e=>showToast(e.message,'error'));" style="padding:5px 10px;font-size:12px" data-i18n="notifications_enable_btn">Enable notifications</button>
+                  <button type="button" class="sm-btn" id="notificationPermissionButton" onclick="requestNotificationPermission()" style="padding:5px 10px;font-size:12px" data-i18n="notifications_enable_btn">Enable notifications</button>
                 </span>
                 <button type="button" class="sm-btn" onclick="sendBrowserNotification('Hermes test','Notifications are ready.',{force:true});" style="padding:5px 10px;font-size:12px" data-i18n="notifications_test_btn">Send test</button>
                 <span id="notificationPermissionStatus" style="font-size:11px;color:var(--muted)"></span>
@@ -1644,12 +1658,9 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
-            <div class="settings-field" id="serverControlsBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
-              <label data-i18n="settings_label_server_controls">Server controls</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_restart_server">Restart is available when the server owner configures a restart command. The WebUI checks active work first, runs the configured restart action, and shows status while this tab reconnects.</div>
-              <button class="sm-btn" id="btnRestartServer" onclick="restartServer()" style="width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3)" data-i18n="settings_btn_restart_server">Restart server</button>
-              <div id="restartServerStatus" class="settings-autosave-status" aria-live="polite" data-i18n="settings_restart_status_idle">Idle</div>
-              <div style="font-size:11px;color:var(--muted);margin:10px 0 8px"><span data-i18n="settings_desc_shutdown_before_cmd">Gracefully stops the local WebUI server. Useful if you launched via </span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_between_cmds"> and want to stop without switching to a terminal. You'll need to relaunch the server (</span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_after_cmd"> or the native app) before the WebUI is reachable again.</span></div>
+            <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px"><span data-i18n="settings_desc_shutdown_before_cmd">Gracefully stops the local WebUI server. Useful if you launched via </span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_between_cmds"> and want to stop without switching to a terminal. You'll need to relaunch the server (</span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_after_cmd"> or the native app) before the WebUI is reachable again.</span></div>
               <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
             </div>
             <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">

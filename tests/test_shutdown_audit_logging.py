@@ -1,6 +1,7 @@
 import logging
-import types
 import threading
+import types
+from pathlib import Path
 
 
 def test_server_shutdown_audit_logs_active_stream_context(monkeypatch, caplog):
@@ -69,3 +70,72 @@ def test_shutdown_route_logs_request_context_without_starting_real_shutdown(monk
     assert "pytest-agent\r\nforged" not in logged
     assert responses == [{"status": "shutting_down"}]
     assert started_threads and started_threads[0][1] is True
+
+
+def test_shutdown_route_disarms_configured_supervisor_before_exit(monkeypatch, tmp_path):
+    from api import routes
+
+    marker = tmp_path / "service-enabled"
+    marker.write_text("enabled\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_WEBUI_RUN_MARKER", str(marker))
+
+    responses = []
+    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw)) or True)
+    started_threads = []
+
+    class FakeThread:
+        def __init__(self, target, daemon=False):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            started_threads.append((self.target, self.daemon))
+
+    monkeypatch.setattr(threading, "Thread", FakeThread)
+    handler = types.SimpleNamespace(
+        client_address=("127.0.0.1", 12345),
+        command="POST",
+        path="/api/shutdown",
+        headers={"User-Agent": "pytest-agent"},
+    )
+
+    assert routes._handle_shutdown(handler) is True
+
+    assert not marker.exists()
+    assert responses == [({"status": "shutting_down", "intentional_stop": True}, {})]
+    assert started_threads and started_threads[0][1] is True
+
+
+def test_shutdown_route_refuses_exit_when_supervisor_cannot_be_disarmed(monkeypatch, tmp_path):
+    from api import routes
+
+    marker = tmp_path / "service-enabled"
+    marker.write_text("enabled\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_WEBUI_RUN_MARKER", str(marker))
+    monkeypatch.setattr(Path, "unlink", lambda self, **kwargs: (_ for _ in ()).throw(OSError("blocked")))
+
+    responses = []
+    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw)) or True)
+    started_threads = []
+
+    class FakeThread:
+        def __init__(self, target, daemon=False):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            started_threads.append((self.target, self.daemon))
+
+    monkeypatch.setattr(threading, "Thread", FakeThread)
+    handler = types.SimpleNamespace(
+        client_address=("127.0.0.1", 12345),
+        command="POST",
+        path="/api/shutdown",
+        headers={"User-Agent": "pytest-agent"},
+    )
+
+    assert routes._handle_shutdown(handler) is True
+
+    assert marker.exists()
+    assert responses == [({"error": "Could not stop the supervised WebUI safely"}, {"status": 500})]
+    assert started_threads == []

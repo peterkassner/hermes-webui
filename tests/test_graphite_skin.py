@@ -60,13 +60,14 @@ def test_graphite_skin_keeps_code_block_frame_continuous():
     assert ':root[data-skin="graphite"] .pre-header+pre{border-color:var(--border-muted);border-top:1px solid var(--border-muted);margin-top:0;}' in CSS
 
 
-def test_graphite_skin_uses_native_ui_and_mono_font_stacks():
-    assert '--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif' in CSS
-    assert '--font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace' in CSS
+def test_graphite_skin_uses_shared_ui_and_mono_font_stacks():
+    assert CSS.count('--font-ui:') == 1
+    assert '--font-ui:"Inter Tight",Inter,-apple-system,BlinkMacSystemFont,system-ui,sans-serif' in CSS
+    assert '--font-mono:"CommitMono","Commit Mono",ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace' in CSS
     assert "font-weight:430" in CSS
     assert "-webkit-font-smoothing:antialiased" in CSS
     assert ':root[data-skin="graphite"] textarea#msg' in CSS
     assert ':root[data-skin="graphite"] textarea#msg{font-family:var(--font-ui)!important;font-size:14px;' in CSS
-    assert ':root[data-skin="graphite"] .msg-body{font-family:var(--font-conversation);font-size:13px;font-weight:430;' in CSS
+    assert ':root[data-skin="graphite"] .msg-body{font-family:var(--font-ui);font-size:13px;font-weight:430;' in CSS
     assert ':root[data-skin="graphite"][data-font-size="large"] .msg-body{font-size:15px;' in CSS
     assert ':root[data-skin="graphite"] .tool-card-name' in CSS
