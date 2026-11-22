@@ -13884,6 +13884,9 @@ def _login_locale_from_accept_language(header: str | None) -> str | None:
 _LOGIN_PAGE_HTML = """<!doctype html>
 <html lang="{{LANG}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{BOT_NAME}} — {{LOGIN_TITLE}}</title>
+<link rel="icon" type="image/svg+xml" href="static/favicon.svg?v={{WEBUI_VERSION}}">
+<link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png?v={{WEBUI_VERSION}}">
+<link rel="shortcut icon" href="static/favicon.ico?v={{WEBUI_VERSION}}">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#1a1a2e;color:#e8e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;

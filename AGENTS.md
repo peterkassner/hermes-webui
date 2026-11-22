@@ -25,8 +25,8 @@ unrelated work. Keep subsystem-specific safety and contract requirements below.
 
 ## Active local deployment policy
 
-The local launchd-served fork is intentionally activated from
-`experiment/no-virtual-keyboard-compensation`, not `master`. It removes all application-side virtual-keyboard GUI accommodation:
+Use `master` for development and for the local launchd-served checkout.
+The fork removes application-side virtual-keyboard GUI accommodation:
 keyboard inset measurements, `visualViewport` keyboard listeners, iOS focus-zoom
 rules, and keyboard-driven popup repositioning. The browser/OS is authoritative
 for virtual-keyboard and viewport geometry on every form factor. This is a
