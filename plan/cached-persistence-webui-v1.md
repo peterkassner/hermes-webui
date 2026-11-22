@@ -4,7 +4,7 @@ version: "1.0"
 date_created: 2026-11-22
 last_updated: 2026-11-22
 last_linked: 2026-11-22
-status: In progress
+status: Completed
 ---
 
 # Introduction
@@ -38,8 +38,8 @@ A second message in the same chat reuses the in-process Agent. The fork currentl
 
 | Task | Description | Completed | Date |
 |---|---|---|---|
-| TASK-006 | Before deployment, record the release manifest, current listener PID, active streams and a restorable copy or revision of the previously running WebUI source and configuration. Account for previously uncommitted runtime edits. Let active turns finish. Use the existing WebUI service control for one combined restart. Verify a new listener, successful health response and authenticated access. | | |
-| TASK-007 | Run TEST-004, recording the session ID, completed turns, persisted history and sidebar observations. If a release regression appears, preserve the error and timestamps, drain active turns, restore the recorded WebUI release and verify authenticated chat after restart. | | |
+| TASK-006 | Before deployment, record the release manifest, current listener PID, active streams and a restorable copy or revision of the previously running WebUI source and configuration. Account for previously uncommitted runtime edits. Let active turns finish. Use the existing WebUI service control for one combined restart. Verify a new listener, successful health response and authenticated access. | Yes | 2026-11-22 |
+| TASK-007 | Run TEST-004, recording the session ID, completed turns, persisted history and sidebar observations. If a release regression appears, preserve the error and timestamps, drain active turns, restore the recorded WebUI release and verify authenticated chat after restart. | Yes | 2026-11-22 |
 
 ## 3. Alternatives
 
@@ -92,4 +92,10 @@ The four-client browser runs each lasted 120 seconds with slow and failed refres
 - external: 1,916 successful reads, 1,133 writes, observed title counts per client [22, 22, 22, 22].
 - stream: 1,916 successful reads, 1,131 writes, observed title counts per client [23, 23, 23, 23].
 
-Combined deployment and authenticated live verification are pending (TASK-006 and TASK-007).
+## Combined deployment and live verification, November 22
+
+The launchd restart replaced PID 74901 with PID 75935 after zero active runs and streams. Loopback health returned in 158 seconds and the cache published its first session list in 161 seconds. The live in-process chat completed three consecutive turns. Chromium reloaded the conversation and displayed each expected reply. The core database contained six alternating messages and zero outstanding turn leases. The verification chat was archived.
+
+Two authenticated Chromium clients observed 39 session-title writes across 326.57 seconds, including 55 samples with an active stream. Each received 406 successful sidebar responses and displayed 38 successive titles. Cache publications advanced from 1 to 44. The service served 240 reads during refresh with zero refresh failures. The measured 95th-percentile sidebar request took 43 ms.
+
+All 376 tests selected for the fixes passed. The separate 73-test gateway-sync suite had five failures. All five also failed on the pre-fix baseline, where a sixth case failed. Two current failures involve the removed Agent batch-append method during reset-child checks. Three involve distinct Telegram conversations being grouped together. The initial verification script used an incorrect history-query parameter and returned HTTP 400. The independent reload check used the browser’s canonical history endpoint and passed.
